@@ -1,0 +1,8 @@
+/* Fenêtre overlay uniquement : neutralise le "coffre" de la fenêtre principale
+   (fond sombre arrondi + bordure porté par #root dans index.css).
+   Le ticker doit flotter directement sur le jeu. */
+#root {
+  border-radius: 0;
+  border: none;
+  background: transparent;
+}

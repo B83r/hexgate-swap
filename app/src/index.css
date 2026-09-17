@@ -1,0 +1,252 @@
+@import "tailwindcss";
+
+@font-face {
+  font-family: "Chakra Petch";
+  src: url("./assets/fonts/chakra-petch-600.woff2") format("woff2");
+  font-weight: 600;
+  font-display: swap;
+}
+
+@theme {
+  --font-sans: "Chakra Petch", "Segoe UI", Inter, Avenir, Helvetica, Arial, sans-serif;
+  --font-display: "Chakra Petch", "Segoe UI", Inter, Avenir, Helvetica, Arial, sans-serif;
+  /* Police dédiée à la barre de navigation (onglets + pilule auto-accept + recherche) */
+  --font-nav: "Chakra Petch", "Segoe UI", sans-serif;
+
+  /* Palette Hextech — reprise du switcher Python (switcher/ui_assets.py) */
+  --color-bg: #010a13;
+  --color-panel: #0a1428;
+  --color-card: #0f1b2e;
+  --color-card-hover: #15263f;
+  --color-border: #1e2d45;
+  --color-border-hover: #2c4468;
+
+  --color-gold: #c8aa6e;
+  --color-gold-bright: #f0e6d2;
+  --color-gold-dim: #785a28;
+  --color-hextech-blue: #0ac8b9;
+
+  --color-text: #f0e6d2;
+  --color-muted: #7c8aa0;
+  --color-green: #3ddc97;
+  --color-red: #e05c5c;
+  --color-wr-loss: #79303c;
+
+  --color-tier-iron: #9a9a9a;
+  --color-tier-bronze: #c98d52;
+  --color-tier-silver: #c3d1d1;
+  --color-tier-gold: #f1c95c;
+  --color-tier-platinum: #4fc0b2;
+  --color-tier-emerald: #3ddc97;
+  --color-tier-diamond: #8aa6ff;
+  --color-tier-master: #c084fc;
+  --color-tier-grandmaster: #f87171;
+  --color-tier-challenger: #fcd34d;
+}
+
+/* Couleurs de lueur du fond (aurora blobs / particules) — surchargées par thème (Phase 5). */
+:root {
+  --glow-1: #c8aa6e;
+  --glow-2: #0ac8b9;
+}
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html,
+  body {
+    /* fenêtre transparente : le fond arrondi est porté par #root */
+    background: transparent;
+  }
+
+  body {
+    @apply text-text antialiased;
+    font-family: var(--font-sans);
+  }
+
+  #root {
+    height: 100vh;
+    overflow: hidden;
+    border-radius: 12px;
+    border: 1px solid rgba(200, 170, 110, 0.14);
+    background: var(--color-bg);
+  }
+}
+
+/* scrollbar overlay fine dorée */
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: linear-gradient(var(--color-gold-dim), var(--color-border));
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(var(--color-gold), var(--color-gold-dim));
+  background-clip: padding-box;
+}
+
+/* balayage lumineux réutilisable (titres, skeletons, boutons) */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@keyframes sheen {
+  0% { transform: translateX(-120%) skewX(-18deg); }
+  60%, 100% { transform: translateX(320%) skewX(-18deg); }
+}
+
+@keyframes spin-slow {
+  to { transform: rotate(360deg); }
+}
+
+/* bordure lumineuse animée (n'anime que l'angle du conic-gradient) */
+@property --beam-angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
+}
+@keyframes beam-rotate {
+  to { --beam-angle: 360deg; }
+}
+.border-beam {
+  background: conic-gradient(
+    from var(--beam-angle),
+    transparent 0deg,
+    var(--beam-color, #3ddc97) 65deg,
+    transparent 140deg,
+    transparent 360deg
+  );
+  padding: 2.25px;
+  filter: drop-shadow(0 0 5px var(--beam-color, #3ddc97));
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: beam-rotate var(--beam-duration, 4s) linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .border-beam { animation: none; }
+}
+
+/* bouton JOUER : reflet qui traverse en boucle + au survol */
+.play-btn::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 40%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.55), transparent);
+  transform: translateX(-120%) skewX(-18deg);
+  animation: sheen 3.6s ease-in-out infinite;
+}
+.play-btn:hover::after {
+  animation-duration: 1.2s;
+}
+.play-btn:hover {
+  background: var(--color-gold-bright);
+}
+@media (prefers-reduced-motion: reduce) {
+  .play-btn::after { animation: none; }
+}
+
+/* Cartes hors viewport : le navigateur saute style+layout+paint du contenu
+   (la taille est réservée, mémorisée après le premier rendu). */
+.cv-card {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 88px;
+}
+
+/* Aurora blobs du fond : mêmes trajectoires/durées qu'avant (ex-framer), mais en
+   keyframes CSS compositor-only (transform/opacity) — zéro travail JS par frame.
+   Les tableaux framer à 4 valeurs se répartissaient sur 0/33/66/100 %, ceux à 3
+   sur 0/50/100 %. Le timing ease-in-out s'applique par segment (comme framer). */
+@keyframes aurora-1 {
+  0% { transform: translate(0px, 0px) scale(1); }
+  33.333% { transform: translate(60px, 40px) scale(1.15); }
+  66.666% { transform: translate(-20px, 80px) scale(0.95); }
+  100% { transform: translate(0px, 0px) scale(1); }
+}
+@keyframes aurora-2 {
+  0% { transform: translate(0px, 0px) scale(1); }
+  33.333% { transform: translate(-50px, -30px) scale(1.1); }
+  66.666% { transform: translate(20px, -70px) scale(0.9); }
+  100% { transform: translate(0px, 0px) scale(1); }
+}
+@keyframes aurora-3 {
+  0% { transform: translate(-40px, 0px); }
+  50% { transform: translate(40px, 50px); }
+  100% { transform: translate(-40px, 0px); }
+}
+.aurora-1 { animation: aurora-1 26s ease-in-out infinite; will-change: transform; }
+.aurora-2 { animation: aurora-2 30s ease-in-out infinite; will-change: transform; }
+.aurora-3 { animation: aurora-3 34s ease-in-out infinite; will-change: transform; }
+
+/* Halo pulsant du tier autour de l'emblème de rang (ex-framer par carte). */
+@keyframes tier-halo {
+  0%, 100% { opacity: 0.15; transform: scale(0.85); }
+  50% { opacity: 0.4; transform: scale(1.05); }
+}
+.tier-halo { animation: tier-halo 3s ease-in-out infinite; will-change: transform, opacity; }
+
+/* Gel des animations DÉCORATIVES quand la fenêtre n'est pas regardée
+   (classe posée sur <html> par App via useWindowActive). Les spinners
+   fonctionnels (chargements, swap) ne sont volontairement PAS listés. */
+html.fx-frozen .border-beam,
+html.fx-frozen .play-btn::after,
+html.fx-frozen .shiny-title,
+html.fx-frozen .runic-fill,
+html.fx-frozen .runic-fill::before,
+html.fx-frozen .fx-decor {
+  animation-play-state: paused !important;
+}
+
+/* Mode « Basse consommation » (réglages, classe posée sur <html> par useLowPower) :
+   ① animations décoratives coupées net (pas juste en pause) ; ② backdrop-blur
+   remplacés par un fond bleu-nuit quasi opaque équivalent (tous les usages du
+   projet sont des fonds sombres) — gros gain GPU de compositing. */
+html.low-power .border-beam,
+html.low-power .play-btn::after,
+html.low-power .shiny-title,
+html.low-power .runic-fill,
+html.low-power .runic-fill::before,
+html.low-power .fx-decor {
+  animation: none !important;
+}
+html.low-power [class*="backdrop-blur"] {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  background-color: rgba(4, 10, 19, 0.97) !important;
+}
+
+/* titre or avec balayage lumineux (Magic UI « shiny text ») */
+.shiny-title {
+  font-family: var(--font-display);
+  background: linear-gradient(
+    100deg,
+    var(--color-gold-dim) 0%,
+    var(--color-gold) 30%,
+    var(--color-gold-bright) 50%,
+    var(--color-gold) 70%,
+    var(--color-gold-dim) 100%
+  );
+  background-size: 200% auto;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: shimmer 6s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shiny-title { animation: none; }
+}

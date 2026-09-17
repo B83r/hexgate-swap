@@ -1,0 +1,24 @@
+# Secrets — jamais committés
+.env
+*.env
+backend/.env
+
+# Dépendances / builds générés
+node_modules/
+app/dist/
+app/src-tauri/target/
+**/target/
+backend/build/
+backend/dist/
+app/src-tauri/resources/hexgate-backend/
+app/src-tauri/binaries/
+__pycache__/
+*.pyc
+
+# Artefacts de release / scratch
+*.exe
+tmp/
+
+# Éditeurs / OS
+.DS_Store
+Thumbs.db
