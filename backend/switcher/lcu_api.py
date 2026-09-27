@@ -230,6 +230,23 @@ def current_summoner() -> dict | None:
             "puuid": d.get("puuid")}
 
 
+def region() -> str | None:
+    """Région du compte connecté ('EUW', 'NA'…), telle que le client la donne.
+
+    Seule source fiable : les fichiers de session sauvegardés sont binaires
+    depuis les versions récentes du client Riot, la région n'y est plus
+    lisible.
+    """
+    status, body = _call("GET", "/riotclient/region-locale")
+    if status != 200:
+        return None
+    try:
+        value = json.loads(body).get("region")
+    except ValueError:
+        return None
+    return value.upper() if isinstance(value, str) and value else None
+
+
 def ranked_stats() -> dict:
     """{'solo': {tier, division, lp, wins, losses}, 'flex': {...}} (clés absentes si unranked)."""
     status, body = _call("GET", "/lol-ranked/v1/current-ranked-stats")

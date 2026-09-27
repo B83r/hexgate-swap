@@ -72,7 +72,7 @@ const UNRANKED: Record<string, string> = {
   de: "Unplatziert", it: "Non classificato", pt: "Sem classificação",
 };
 
-function tierName(tier: string, lang: string): string {
+export function tierName(tier: string, lang: string): string {
   return (TIER_NAMES[lang] ?? TIER_FR)[tier] ?? tier;
 }
 

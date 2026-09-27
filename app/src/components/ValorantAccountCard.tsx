@@ -49,9 +49,21 @@ export function ValorantAccountCard({ account, selected, onSelect, onPlay, onLau
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <h2 className="truncate text-[17px] font-extrabold text-[#f5e9e9]">{account.riot_id || account.name}</h2>
-          <span className="rounded border border-[#d6a34f]/50 px-1 py-0.5 text-[7px] font-black tracking-wider text-[#e7bf72]">VAL</span>
+          <span className="rounded border border-[#d6a34f]/50 px-1 py-0.5 text-[11px] font-black tracking-wider text-[#e7bf72]">VAL</span>
         </div>
-        <p className="mt-1 text-[11px] font-semibold uppercase tracking-wide text-[#e6b8bd]">VALORANT · {status}{stats?.rank ? ` · ${stats.rank.label}${stats.rank.rr !== null ? ` ${stats.rank.rr} RR` : ""}` : ""}</p>
+        <p className="mt-1 text-[11px] font-semibold uppercase tracking-wide text-[#e6b8bd]">
+          {/* Le statut « connecté » est déjà porté par la pastille verte à droite. */}
+          VALORANT{!connected && ` · ${status}`}{stats?.rank ? ` · ${stats.rank.label}${stats.rank.rr !== null ? ` ${stats.rank.rr} RR` : ""}` : ""}
+        </p>
+        {stats && (
+          <p className="mt-0.5 text-[11px] text-[#c9a3a9]">
+            {[
+              stats.wins + stats.losses > 0 ? `${stats.wins} V · ${stats.losses} D` : null,
+              stats.top_agent,
+              stats.account_level != null ? `${t("val.dashboard.level")} ${stats.account_level}` : null,
+            ].filter(Boolean).join(" · ")}
+          </p>
+        )}
       </div>
       <button
         onClick={(e) => { e.stopPropagation(); onTogglePin(account.name, !account.pinned); }}

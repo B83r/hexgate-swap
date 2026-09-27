@@ -10,9 +10,11 @@ parties classées) pour reconstruire une courbe de rang partie-par-partie.
   rebours depuis le LP actuel avec un gain/perte typique).
 - Elle n'expose pas non plus le vrai classement ladder (hors Master+) ni le MMR.
 
-La clé (RIOT_API_KEY) est lue depuis un .env local à la racine du projet — jamais
-committée. Une clé *dev* expire toutes les 24 h : en cas de 401/403 « clé
-invalide », en régénérer une sur developer.riotgames.com.
+La clé est d'abord cherchée dans le stockage sécurisé (DPAPI, saisie via
+Réglages > Données & comptes) ; à défaut elle est lue depuis un .env local à
+la racine du projet (usage dev) — jamais committée. Une clé *dev* Riot expire
+toutes les 24 h : en cas de 401/403 « clé invalide », en régénérer une sur
+developer.riotgames.com.
 """
 from __future__ import annotations
 
@@ -26,11 +28,18 @@ import os
 import threading
 from pathlib import Path
 
+from . import secure_settings
+
+SECRET_KEY = "riot_api_key"
+
 # --- Chargement de la clé depuis .env (racine du projet, un cran au-dessus du package) ---
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _load_env_key() -> str | None:
+    stored = secure_settings.get_secret(SECRET_KEY)
+    if stored:
+        return stored
     key = os.environ.get("RIOT_API_KEY")
     if key:
         return key.strip()
@@ -114,7 +123,7 @@ class RiotClient:
     def __init__(self, key: str | None = None):
         self.key = key or _load_env_key()
         if not self.key:
-            raise RiotApiError("Aucune clé Riot API (RIOT_API_KEY absent du .env).")
+            raise RiotApiError("Configure d'abord ta clé Riot API dans Réglages > Données & comptes.")
 
     def _get(self, host: str, path: str, params: dict | None = None):
         url = f"https://{host}.api.riotgames.com{path}"
@@ -209,6 +218,9 @@ class RiotClient:
                 continue
             me = next((p for p in info.get("participants", []) if p.get("puuid") == puuid), None)
             if me is None:
+                continue
+            # Partie annulée (remake) : aucun LP ni V/D comptabilisé côté Riot.
+            if me.get("gameEndedInEarlySurrender") or info.get("gameDuration", 999) < 210:
                 continue
             end_ms = info.get("gameEndTimestamp") or info.get("gameStartTimestamp") or 0
             results.append({"win": bool(me.get("win")), "end": end_ms / 1000.0})
@@ -340,6 +352,7 @@ class RiotClient:
                 "queue_id": qid,
                 "champion": me.get("championName"),
                 "win": bool(me.get("win")),
+                "remake": bool(me.get("gameEndedInEarlySurrender")) or info.get("gameDuration", 999) < 210,
                 "kills": me.get("kills", 0),
                 "deaths": me.get("deaths", 0),
                 "assists": me.get("assists", 0),

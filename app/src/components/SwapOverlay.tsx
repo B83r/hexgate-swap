@@ -16,14 +16,14 @@ interface Props {
   product?: Product;
 }
 
-/** Hexagone (points) pour le tracé du ring de progression. */
-function hexPath(cx: number, cy: number, r: number): string {
-  return (
-    Array.from({ length: 6 }, (_, i) => {
-      const a = (Math.PI / 3) * i - Math.PI / 2;
-      return `${i === 0 ? "M" : "L"} ${(cx + r * Math.cos(a)).toFixed(1)} ${(cy + r * Math.sin(a)).toFixed(1)}`;
-    }).join(" ") + " Z"
-  );
+/** Arc n°`i` d'un anneau découpé en `n` segments séparés par un petit intervalle. */
+function arcPath(cx: number, cy: number, r: number, i: number, n: number): string {
+  const gap = 0.16; // radians laissés vides entre deux segments
+  const span = (Math.PI * 2) / n;
+  const a0 = -Math.PI / 2 + span * i + gap / 2;
+  const a1 = -Math.PI / 2 + span * (i + 1) - gap / 2;
+  const p = (a: number) => `${(cx + r * Math.cos(a)).toFixed(1)} ${(cy + r * Math.sin(a)).toFixed(1)}`;
+  return `M ${p(a0)} A ${r} ${r} 0 0 1 ${p(a1)}`;
 }
 
 export function SwapOverlay({ open, account, iconId, currentStep, footer, footerTone, product = "league_of_legends" }: Props) {
@@ -33,7 +33,6 @@ export function SwapOverlay({ open, account, iconId, currentStep, footer, footer
     ? "/assets/nextrank/logos/valorant-wordmark.webp"
     : "/assets/nextrank/logos/lol-wordmark.svg";
   const total = STEPS.length;
-  const progress = Math.max(0, Math.min(currentStep, total)) / total;
   const success = footerTone === "green";
   const error = footerTone === "red";
   const ringColor = error ? "#e05c5c" : success ? "#3ddc97" : "#c8aa6e";
@@ -57,9 +56,9 @@ export function SwapOverlay({ open, account, iconId, currentStep, footer, footer
           />
 
           <motion.div
-            initial={{ scale: 0.9, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            transition={{ type: "spring", stiffness: 240, damping: 22 }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.25 }}
             className="relative flex flex-col items-center"
           >
             {/* ring hexagonal */}
@@ -69,41 +68,38 @@ export function SwapOverlay({ open, account, iconId, currentStep, footer, footer
               transition={{ duration: 0.35 }}
             >
               <svg viewBox="0 0 200 200" className="absolute inset-0 h-full w-full">
-                {/* spinner bleu en rotation continue */}
-                {!success && !error && (
-                  <motion.g
-                    style={{ originX: "100px", originY: "100px" }}
-                    animate={{ rotate: 360 }}
-                    transition={{ duration: 6, repeat: Infinity, ease: "linear" }}
-                  >
-                    <path
-                      d={hexPath(100, 100, 92)}
+                {/* Anneau à 4 segments : un par étape réelle du swap (fermeture du
+                    client, restauration de la session, relance, lancement du jeu). */}
+                {STEPS.map((_, i) => {
+                  const done = i < currentStep || success;
+                  const active = i === currentStep && !success && !error;
+                  return (
+                    <motion.path
+                      key={i}
+                      d={arcPath(100, 100, 80, i, total)}
                       fill="none"
-                      stroke="#0ac8b9"
-                      strokeWidth="1.5"
-                      strokeOpacity="0.3"
-                      strokeDasharray="4 14"
+                      strokeWidth="5"
+                      strokeLinecap="round"
+                      initial={false}
+                      animate={{
+                        stroke: done ? ringColor : active ? "#0ac8b9" : "#1e2d45",
+                        opacity: active ? [0.55, 1, 0.55] : 1,
+                      }}
+                      transition={
+                        active
+                          ? { opacity: { duration: 1.2, repeat: Infinity, ease: "easeInOut" }, stroke: { duration: 0.3 } }
+                          : { duration: 0.35 }
+                      }
+                      style={done ? { filter: `drop-shadow(0 0 5px ${ringColor})` } : undefined}
                     />
-                  </motion.g>
-                )}
-                {/* piste */}
-                <path d={hexPath(100, 100, 80)} fill="none" stroke="#1e2d45" strokeWidth="4" />
-                {/* progression */}
-                <motion.path
-                  d={hexPath(100, 100, 80)}
-                  fill="none"
-                  stroke={ringColor}
-                  strokeWidth="4.5"
-                  strokeLinecap="round"
-                  style={{ filter: `drop-shadow(0 0 6px ${ringColor})` }}
-                  animate={{ pathLength: success ? 1 : progress }}
-                  transition={{ duration: 0.5, ease: "easeInOut" }}
-                />
+                  );
+                })}
               </svg>
 
               {/* avatar du compte cible au centre */}
               <div className="absolute inset-0 flex items-center justify-center">
                 <motion.img
+                  layoutId={`account-avatar-${account}`}
                   src={avatarUrl(iconId, account?.[0] ?? "?", ringColor)}
                   alt=""
                   className="h-[92px] w-[92px] rounded-full border-2"

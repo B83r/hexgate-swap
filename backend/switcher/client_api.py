@@ -15,7 +15,11 @@ class ClientNotRunning(Exception):
     """Le client Riot ne répond pas (pas démarré, ou lockfile périmé)."""
 
 
-def _call(method: str, path: str, timeout: float = 5) -> tuple[int, str]:
+def _call(method: str, path: str, body: object = None,
+          timeout: float = 5) -> tuple[int, str]:
+    """Appel REST local. `body` est sérialisé en JSON tel quel : certains
+    endpoints du client Riot attendent une CHAÎNE JSON nue comme corps
+    (`"<jeton>"`) et non un objet — passer la chaîne Python suffit."""
     try:
         parts = LOCKFILE.read_text(encoding="utf-8").split(":")
         port, password = parts[2], parts[3]
@@ -24,6 +28,7 @@ def _call(method: str, path: str, timeout: float = 5) -> tuple[int, str]:
     auth = base64.b64encode(f"riot:{password}".encode()).decode()
     req = urllib.request.Request(
         f"https://127.0.0.1:{port}{path}", method=method,
+        data=None if body is None else json.dumps(body).encode(),
         headers={"Authorization": f"Basic {auth}", "Content-Type": "application/json"},
     )
     try:

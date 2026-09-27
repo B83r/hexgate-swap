@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
-import { AnimatePresence, Reorder, useDragControls } from "framer-motion";
+import { AnimatePresence, motion, Reorder, useDragControls } from "framer-motion";
 import { Toaster, toast } from "sonner";
 import { Plus, Save, Trash2, AlertTriangle, Search, BarChart2, List, Swords, MessageSquare, Wrench } from "lucide-react";
 import { api, subscribeEvents, type Account, type ServerEvent, type Recap, type Wallet, type Product, type ProductStatus } from "@/lib/api";
@@ -673,7 +673,7 @@ export default function App() {
       <Background />
       <Splash show={splash} />
       <Confetti fire={confetti} />
-      <Header penaltySeconds={penaltySeconds} product={product} productStatus={productStatus} onProductChange={switchProduct} />
+      <Header swapping={swap !== null} penaltySeconds={penaltySeconds} product={product} productStatus={productStatus} onProductChange={switchProduct} />
 
       {/* Premium Segmented Tab Switcher.
           Ordre de sacrifice en fenêtre étroite : d'abord l'estimation de file
@@ -684,7 +684,7 @@ export default function App() {
           Le groupe de droite reste `shrink-0` pour que le bouton réglages ne
           sorte jamais du cadre. */}
       <div className="flex items-center justify-between gap-2 px-4 pt-2.5 pb-2 border-b border-border/10 bg-[#020912]/20">
-        <div className="flex min-w-0 shrink overflow-x-auto bg-[#050b14]/90 p-0.5 border border-border/40 rounded-xl text-[10px] font-bold uppercase tracking-wider font-nav [scrollbar-width:none]">
+        <div className="flex min-w-0 shrink overflow-x-auto bg-[#050b14]/90 p-0.5 border border-border/40 rounded-xl text-[11px] font-bold uppercase tracking-wider font-nav [scrollbar-width:none]">
           {(product === "valorant" ? [
             { id: "list", labelKey: "nav.accounts", Icon: List },
             { id: "dashboard", labelKey: "nav.dashboard", Icon: BarChart2 },
@@ -693,10 +693,8 @@ export default function App() {
             { id: "list", labelKey: "nav.accounts", Icon: List },
             { id: "dashboard", labelKey: "nav.dashboard", Icon: BarChart2 },
             { id: "matches", labelKey: "nav.matches", Icon: Swords },
-            // A remplacé l'onglet « Overlay » le 12/09/2026 : les réglages
-            // d'overlay ne sont consultés qu'une fois puis oubliés, ils sont
-            // passés dans Réglages → Overlay. League uniquement : tout cet
-            // onglet passe par l'API locale du client LoL, absente de VALORANT.
+            // League uniquement : tout cet onglet passe par l'API locale du
+            // client LoL, absente de VALORANT.
             { id: "tools", labelKey: "nav.tools", Icon: Wrench },
           ] as const).map(({ id, labelKey, Icon }) => (
             <button
@@ -704,12 +702,20 @@ export default function App() {
               onClick={() => setView(id as "list" | "dashboard" | "matches" | "tools")}
               title={t(labelKey)}
               className={cn(
-                "flex shrink-0 items-center gap-1.5 whitespace-nowrap px-3 py-1.5 rounded-lg transition-all duration-300",
-                view === id ? "bg-gold text-black shadow-md font-extrabold" : "text-muted hover:text-text hover:bg-card-hover/20"
+                "relative flex shrink-0 items-center gap-1.5 whitespace-nowrap px-3 py-1.5 rounded-lg transition-colors duration-200",
+                view === id ? "text-black font-extrabold" : "text-muted hover:text-text hover:bg-card-hover/20"
               )}
             >
-              <Icon className="h-3.5 w-3.5" style={view === id ? undefined : { stroke: "url(#icon-gold-grad)" }} />
-              <span className="hidden sm:inline">{t(labelKey)}</span>
+              {/* Pastille commune : elle glisse d'un onglet à l'autre. */}
+              {view === id && (
+                <motion.span
+                  layoutId="nav-pill"
+                  className="absolute inset-0 rounded-lg bg-gold shadow-md"
+                  transition={{ type: "spring", stiffness: 500, damping: 38 }}
+                />
+              )}
+              <Icon className="relative h-3.5 w-3.5" style={view === id ? undefined : { stroke: "url(#icon-gold-grad)" }} />
+              <span className="relative hidden sm:inline">{t(labelKey)}</span>
             </button>
           ))}
         </div>
@@ -742,6 +748,13 @@ export default function App() {
 
       {/* Main content body switcher */}
       <div className="flex-1 overflow-y-auto px-4 py-1.5">
+        <motion.div
+          key={view}
+          className="h-full"
+          initial={{ opacity: 0, y: 6 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.18, ease: "easeOut" }}
+        >
         {view === "list" ? (
           <div className="flex flex-col gap-2.5 h-full">
             {/* Quick Search Bar */}
@@ -830,8 +843,9 @@ export default function App() {
             ? <ValorantMatchesView accounts={accounts} refreshing={valorantRefreshing} onRefresh={refreshValorant} />
             : <MatchesView accounts={accounts} activeAccount={accounts.find((a) => a.active) || null} />
         ) : (
-          <ToolsView accounts={accounts} />
+          <ToolsView accounts={accounts} phase={gameflow.phase} />
         )}
+        </motion.div>
       </div>
 
       {/* Footer buttons row */}

@@ -22,40 +22,35 @@
         "transparent": true,
         "shadow": false,
         "visible": false
-      },
-      {
-        "label": "overlay",
-        "title": "Hexgate Overlay",
-        "url": "overlay.html",
-        "width": 260,
-        "height": 70,
-        "x": 1250,
-        "y": 20,
-        "decorations": false,
-        "transparent": true,
-        "alwaysOnTop": true,
-        "visible": false,
-        "skipTaskbar": true,
-        "shadow": false
-      },
-      {
-        "label": "overlay_cd",
-        "title": "Hexgate Overlay Cooldowns",
-        "url": "overlay-cd.html",
-        "width": 320,
-        "height": 150,
-        "x": 1190,
-        "y": 110,
-        "decorations": false,
-        "transparent": true,
-        "alwaysOnTop": true,
-        "visible": false,
-        "skipTaskbar": true,
-        "shadow": false
       }
     ],
     "security": {
-      "csp": null
+      "csp": {
+        "default-src": "'self'",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' data: blob: http://127.0.0.1:8722 https://ddragon.leagueoflegends.com",
+        "font-src": "'self' data:",
+        "connect-src": "'self' ipc: http://ipc.localhost http://127.0.0.1:8722 https://ddragon.leagueoflegends.com",
+        "media-src": "'self' data: blob:",
+        "object-src": "'none'",
+        "base-uri": "'self'",
+        "form-action": "'none'",
+        "frame-ancestors": "'none'"
+      },
+      "devCsp": {
+        "default-src": "'self'",
+        "script-src": "'self' http://localhost:1420",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' data: blob: http://127.0.0.1:8722 https://ddragon.leagueoflegends.com",
+        "font-src": "'self' data:",
+        "connect-src": "'self' ipc: http://ipc.localhost http://127.0.0.1:8722 https://ddragon.leagueoflegends.com http://localhost:1420 ws://localhost:1420",
+        "media-src": "'self' data: blob:",
+        "object-src": "'none'",
+        "base-uri": "'self'",
+        "form-action": "'none'",
+        "frame-ancestors": "'none'"
+      }
     }
   },
   "bundle": {
@@ -68,6 +63,8 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": ["resources/hexgate-backend/**/*"]
+    "resources": [
+      "resources/hexgate-backend/**/*"
+    ]
   }
 }

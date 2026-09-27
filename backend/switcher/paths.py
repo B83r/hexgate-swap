@@ -18,11 +18,6 @@ RIOT_INSTALLS_JSON = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "R
 STORAGE_DIR = LOCALAPPDATA / "LoLSwitcher"
 ACCOUNTS_DIR = STORAGE_DIR / "accounts"
 
-# Cache local du "pic observé" des adversaires croisés en jeu (overlay insight).
-# Ce n'est PAS un vrai career-high (Riot ne l'expose pas) : juste le rang le
-# plus haut que Hexgate a personnellement vu chez ce joueur au fil des games.
-OPPONENT_PEAKS_FILE = STORAGE_DIR / "opponent_peaks.json"
-
 
 def league_install_dir() -> Path | None:
     """Dossier d'installation de League of Legends (pour le lockfile LCU)."""

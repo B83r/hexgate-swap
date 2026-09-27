@@ -1,15 +1,12 @@
 import { useEffect } from "react";
 import { motion, useMotionValue, useSpring, useTransform } from "framer-motion";
-import { Particles } from "./Particles";
 import { prefersReducedMotion } from "@/lib/theme";
-import { useWindowActive } from "@/lib/useWindowActive";
-import { useLowPower } from "@/lib/useLowPower";
 import { subscribePointer } from "@/lib/pointer";
 
 /**
  * Fond vivant monté derrière toute l'UI (fixed inset-0 -z-10) :
- * dégradé profond + vignette, aurora blobs en dérive, poussière dorée,
- * filigrane hexagonal avec léger parallax à la souris.
+ * dégradé profond + vignette + filigrane hexagonal avec léger parallax à la souris.
+ * Aucune boucle d'animation : le fond reste immobile (budget d'animation).
  */
 export function Background() {
   const mx = useMotionValue(0);
@@ -26,13 +23,6 @@ export function Background() {
       my.set((clientY / window.innerHeight) * 2 - 1);
     });
   }, [mx, my]);
-
-  // Animations lourdes coupées quand l'utilisateur ne regarde pas la fenêtre
-  // (partie en cours, app en arrière-plan), quand il a demandé moins de
-  // mouvement, ou en mode Basse consommation.
-  const active = useWindowActive();
-  const lowPower = useLowPower();
-  const animate = !prefersReducedMotion() && active && !lowPower;
 
   return (
     <div className="pointer-events-none fixed inset-0 -z-10 overflow-hidden">
@@ -51,29 +41,7 @@ export function Background() {
         }}
       />
 
-      {/* couche 2 : aurora blobs — mêmes trajectoires/durées, mais en keyframes
-          CSS (transform/opacity compositor-only) au lieu de framer JS/frame. */}
-      {animate && (
-        <>
-          <div
-            className="aurora-1 absolute h-[420px] w-[420px] rounded-full blur-3xl"
-            style={{ background: "var(--glow-1)", opacity: 0.14, top: "-8%", left: "-6%" }}
-          />
-          <div
-            className="aurora-2 absolute h-[380px] w-[380px] rounded-full blur-3xl"
-            style={{ background: "var(--glow-2)", opacity: 0.12, bottom: "-10%", right: "-4%" }}
-          />
-          <div
-            className="aurora-3 absolute left-1/2 top-1/3 h-[300px] w-[300px] rounded-full blur-3xl"
-            style={{ background: "var(--glow-1)", opacity: 0.06 }}
-          />
-        </>
-      )}
-
-      {/* couche 3 : poussière lumineuse (canvas rAF — coupée hors focus) */}
-      {animate && <Particles count={70} className="absolute inset-0 h-full w-full" />}
-
-      {/* couche 4 : filigrane hexagonal + parallax */}
+      {/* filigrane hexagonal + parallax */}
       <motion.div className="absolute inset-[-20px]" style={{ x: px, y: py }}>
         <svg className="h-full w-full opacity-[0.07]" xmlns="http://www.w3.org/2000/svg">
           <defs>

@@ -1,8 +1,31 @@
 // Client du moteur switcher Python (switcher/server.py), exposé en local par
 // le sidecar Tauri. Port fixe en dev ; en prod le sidecar l'annonce sur stdout
 // ("LOL_SWITCHER_READY port=XXXX"), lu côté Rust puis transmis au frontend.
+import { invoke } from "@tauri-apps/api/core";
+
 export const API_PORT = Number((import.meta as any).env?.VITE_SWITCHER_PORT) || 8722;
 const BASE = `http://127.0.0.1:${API_PORT}`;
+
+/** Jeton d'authentification du backend local (commande Rust `api_token`).
+ *
+ * Depuis le 23/09/2026, le backend refuse toute requête sans ce jeton : avant,
+ * n'importe quel programme — voire une page web — pouvait exporter les sessions
+ * Riot ou lui faire ouvrir un exécutable. Le backend le régénère à chaque
+ * démarrage : sur un 401, on le relit une fois puis on rejoue la requête. */
+let _token: string | null = null;
+let _tokenRequest: Promise<string | null> | null = null;
+
+async function apiToken(refresh = false): Promise<string | null> {
+  if (refresh) _token = null;
+  if (_token) return _token;
+  if (!_tokenRequest) {
+    _tokenRequest = invoke<string>("api_token")
+      .then((token) => (_token = token))
+      .catch(() => null) // hors Tauri, ou backend pas encore démarré
+      .finally(() => { _tokenRequest = null; });
+  }
+  return _tokenRequest;
+}
 
 export interface Recap {
   wins: number;
@@ -42,6 +65,8 @@ export interface Match {
   queue_id: number;
   champion: string;
   win: boolean;
+  /** Partie annulée : ni victoire ni défaite, exclue des statistiques. */
+  remake?: boolean;
   kills: number;
   deaths: number;
   assists: number;
@@ -81,20 +106,6 @@ export type Product = "league_of_legends" | "valorant";
  * éléments non listés à l'identique (cf. `lcu_api.clear_identity`). */
 export type IdentityField = "tokens" | "banner" | "crest" | "prestige" | "title";
 
-/** Valeur d'un réglage League. `null` existe réellement : `evtPushToTalk` est
- * nul quand aucune touche n'est assignée — à traiter comme « non assigné »,
- * pas comme une absence de clé. Les nombres viennent des réglages de jeu
- * (échelles, volumes), les booléens des bascules et des Quickbinds. */
-export type SettingValue = string | number | boolean | null;
-
-/** Réglages League : section → clé → valeur. Deux niveaux, jamais plus. */
-export type SettingsTree = Record<string, Record<string, SettingValue>>;
-
-export interface LiveSettings {
-  game: SettingsTree | null;
-  input: SettingsTree | null;
-}
-
 export interface SettingsPreset {
   name: string;
   game_sections: number;
@@ -105,10 +116,31 @@ export interface SettingsPreset {
 export interface PresetsPayload {
   presets: SettingsPreset[];
   accounts: string[];
+  /** Compte actuellement connecté : c'est de lui que se copient les réglages,
+   * et c'est son nom que porte le modèle — l'utilisateur n'en invente aucun. */
+  active: string | null;
   /** Synchro automatique au changement de compte. Si elle est désactivée,
    * appliquer un preset à des comptes n'aura aucun effet au prochain swap —
    * l'interface doit le dire plutôt que de laisser croire à un échec. */
   sync_enabled: boolean;
+}
+
+/** État de la messagerie du client Riot (bug « bloqué au lobby »).
+ * `mismatch` n'est vrai que si l'edge attendu est CONNU et différent : une
+ * région non cartographiée ne doit pas déclencher de fausse alerte. */
+export interface QueueRepairState {
+  client: boolean;
+  affinity: string | null;
+  expected: string | null;
+  state: string | null;
+  mismatch: boolean;
+}
+
+export interface QueueRepairResult {
+  ok: boolean;
+  before: QueueRepairState;
+  after: QueueRepairState;
+  lobby_recreated: boolean;
 }
 
 /** Familles d'échanges proposables en sélection des champions. */
@@ -222,11 +254,21 @@ export function logoUrl(): string {
   return `${BASE}/assets/logo.png`;
 }
 
-async function req<T>(path: string, init?: RequestInit): Promise<T> {
+async function req<T>(path: string, init?: RequestInit, retried = false): Promise<T> {
+  const token = await apiToken();
   const res = await fetch(`${BASE}${path}`, {
-    headers: { "Content-Type": "application/json" },
     ...init,
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { "X-Hexgate-Token": token } : {}),
+      ...(init?.headers as Record<string, string> | undefined),
+    },
   });
+  if (res.status === 401 && !retried) {
+    // Backend redémarré depuis la dernière lecture : nouveau jeton.
+    await apiToken(true);
+    return req<T>(path, init, true);
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data as T;
@@ -271,15 +313,6 @@ export const api = {
     req<{ ok: boolean }>("/valorant/tutorial", { method: "POST", body: JSON.stringify({ name, confirmed }) }),
   refreshValorant: (name: string) =>
     req<{ started: boolean }>("/valorant/refresh", { method: "POST", body: JSON.stringify({ name }) }),
-  /** `champion` = `raw` de l'adversaire ciblé : il reste renseigné même quand le
-   *  Mode Streamer du client LoL vide le riot_id, et permet au backend de savoir
-   *  qu'une cible EST épinglée (sans insight possible) plutôt que de retomber à
-   *  tort sur l'adversaire de lane. */
-  setInsightTarget: (riot_id: string, champion = "") =>
-    req<{ ok: boolean }>("/live-game/insight-target", {
-      method: "POST",
-      body: JSON.stringify({ riot_id, champion }),
-    }),
   reorder: (order: string[]) =>
     req<{ ok: boolean }>("/reorder", { method: "POST", body: JSON.stringify({ order }) }),
   getRankHistory: (name: string) =>
@@ -321,7 +354,7 @@ export const api = {
   getMatchmakingSearch: () => req<any>("/matchmaking-search"),
   getAutoAcceptDelay: () => req<{ delay: number }>("/settings/autoaccept-delay"),
   setAutoAcceptDelay: (delay: number) => req<{ delay: number }>("/settings/autoaccept-delay", { method: "POST", body: JSON.stringify({ delay }) }),
-  getCloudBackup: () => req<{ path: string | null; password?: string }>("/settings/cloud-backup"),
+  getCloudBackup: () => req<{ path: string | null; password_configured: boolean }>("/settings/cloud-backup"),
   setCloudBackup: (path: string | null, password?: string) => req<{ path: string | null }>("/settings/cloud-backup", { method: "POST", body: JSON.stringify({ path, password }) }),
   updatePresence: (statusMessage: string, availability: string) => req<{ ok: boolean }>("/chat/me", { method: "POST", body: JSON.stringify({ statusMessage, availability }) }),
   createPracticeLobby: () => req<{ ok: boolean }>("/lobby/practice", { method: "POST" }),
@@ -344,7 +377,7 @@ export const api = {
   getSettingsAll: () => req<{
     auto_accept_delay: number;
     cloud_backup_path: string | null;
-    cloud_backup_password?: string;
+    cloud_backup_password_configured: boolean;
     auto_accept_invitations: boolean;
     aram_sniper_champions: string;
     lobby_welcome_message: string;
@@ -359,16 +392,15 @@ export const api = {
     end_of_game_message_team_only: boolean;
     relay_client_notifications: boolean;
     game_settings_sync_enabled: boolean;
-    opponent_insight_enabled: boolean;
     low_power_mode: boolean;
     remember_last_product: boolean;
     henrikdev_configured: boolean;
+    riot_api_key_configured: boolean;
     is_admin?: boolean;
   }>("/settings/all"),
   updateSettings: (settings: Partial<{
     auto_accept_delay: number;
     cloud_backup_path: string | null;
-    cloud_backup_password?: string;
     auto_accept_invitations: boolean;
     aram_sniper_champions: string;
     lobby_welcome_message: string;
@@ -383,9 +415,9 @@ export const api = {
     end_of_game_message_team_only: boolean;
     relay_client_notifications: boolean;
     game_settings_sync_enabled: boolean;
-    opponent_insight_enabled: boolean;
     remember_last_product: boolean;
     henrikdev_api_key: string;
+    riot_api_key: string;
   }>) => req<{ ok: boolean }>("/settings/update", { method: "POST", body: JSON.stringify(settings) }),
   spectateFriend: (puuid: string) => req<{ ok: boolean }>("/friends/spectate", { method: "POST", body: JSON.stringify({ puuid }) }),
   openChests: () => req<{ ok: boolean; count: number }>("/loot/open-chests", { method: "POST" }),
@@ -415,22 +447,18 @@ export const api = {
   restoreIdentity: (name: string) =>
     req<{ ok: boolean }>("/tools/identity/restore", { method: "POST", body: JSON.stringify({ name }) }),
   settingsPresets: () => req<PresetsPayload>("/tools/presets"),
-  currentSettings: () => req<LiveSettings>("/tools/settings/current"),
   savePreset: (name: string) =>
     req<{ ok: boolean }>("/tools/presets/save", { method: "POST", body: JSON.stringify({ name }) }),
   deletePreset: (name: string) =>
     req<{ ok: boolean }>("/tools/presets/delete", { method: "POST", body: JSON.stringify({ name }) }),
-  applyPreset: (name: string, accounts: string[], live: boolean) =>
-    req<{ ok: boolean; accounts: number; live: boolean; sync_enabled: boolean; errors: string[] }>(
+  applyPreset: (name: string, accounts: string[], live: boolean, enable_sync = false) =>
+    req<{
+      ok: boolean; accounts: number; live: boolean;
+      sync_enabled: boolean; sync_turned_on: boolean; errors: string[];
+    }>(
       "/tools/presets/apply",
-      { method: "POST", body: JSON.stringify({ name, accounts, live }) },
+      { method: "POST", body: JSON.stringify({ name, accounts, live, enable_sync }) },
     ),
-  editSettings: (patch: { game?: SettingsTree; input?: SettingsTree }) =>
-    req<{ ok: boolean }>("/tools/settings/edit", { method: "POST", body: JSON.stringify(patch) }),
-  saveGameSettings: (name: string) =>
-    req<{ ok: boolean }>("/tools/settings/save", { method: "POST", body: JSON.stringify({ name }) }),
-  restoreGameSettings: (name: string) =>
-    req<{ ok: boolean }>("/tools/settings/restore", { method: "POST", body: JSON.stringify({ name }) }),
   honorRandomAlly: () =>
     req<{ ok: boolean; player: { name: string; champion: string } | null }>("/tools/honor", { method: "POST" }),
   rerollChampion: () => req<{ ok: boolean }>("/tools/reroll", { method: "POST" }),
@@ -438,6 +466,9 @@ export const api = {
     req<{ ok: boolean }>("/tools/swaps/respond", { method: "POST", body: JSON.stringify({ kind, id, action }) }),
   clearNotifications: () =>
     req<{ ok: boolean; count: number }>("/tools/notifications/clear", { method: "POST" }),
+  queueRepairState: () => req<QueueRepairState>("/tools/queue-repair"),
+  repairQueue: () =>
+    req<QueueRepairResult>("/tools/queue-repair", { method: "POST" }),
   setChampSelectPrefs: (name: string, prefs: Partial<ChampSelectPrefs>) =>
     req<{ ok: boolean }>("/champ-select-prefs", { method: "POST", body: JSON.stringify({ name, ...prefs }) }),
   dodgeLobby: () => req<{ ok: boolean }>("/lobby/dodge", { method: "POST" }),
@@ -473,9 +504,6 @@ export type ServerEvent =
   | { type: "auto_accept"; data: { name: string } }
   | { type: "obs_status"; data: { running: boolean } }
   | { type: "ping_update"; data: PingUpdate }
-  | { type: "live_game_stats"; data: { cs: number; time: number; cs_per_min: number; active: boolean } }
-  | { type: "live_game_enemies"; data: LiveGameEnemies }
-  | { type: "live_game_opponent_insight"; data: LiveGameOpponentInsight }
   | { type: "low_power"; data: { enabled: boolean } }
   | { type: "wallet_update"; data: { blue_essence: number; rp: number } }
   | { type: "toast"; text: string; kind: "ok" | "info" | "warn" | "zap" };
@@ -503,48 +531,6 @@ export interface PingUpdate {
   estimated: boolean;
 }
 
-export interface LiveGameEnemy {
-  /** Nom affiché localisé ("Miss Fortune") */
-  champion: string;
-  /** Id interne brut ("game_character_displayname_MissFortune") — dernier segment = id Data Dragon */
-  raw: string;
-  /** "" si masqué (Mode Streamer du client LoL actif chez l'observateur) */
-  riot_id: string;
-  level: number;
-  /** TOP / JUNGLE / MIDDLE / BOTTOM / UTILITY ("" si inconnu) */
-  position: string;
-  items: number[];
-  /** rawDisplayName des 2 sorts d'invocateur ("...SummonerSpell_SummonerFlash_...") */
-  spells: string[];
-  /** Ids des 2 arbres de runes (8300 = Inspiration) — runes mineures non exposées */
-  rune_trees: number[];
-  dead: boolean;
-}
-
-export interface LiveGameEnemies {
-  my_position: string;
-  enemies: LiveGameEnemy[];
-  active: boolean;
-}
-
-export interface LiveGameOpponentInsight {
-  riot_id: string;
-  /** Mon champion au moment de la requête (le matchup est calculé pour CE champion) */
-  champion: string;
-  active: boolean;
-  /** Message si la requête a échoué (clé Riot expirée, compte introuvable…) */
-  error: string | null;
-  /** Rang SoloQ actuel (saison en cours) — null si non classé */
-  solo: { tier: string; division: string | null; lp: number; wins: number; losses: number } | null;
-  /** Bilan dans SES games récentes où son adversaire de lane jouait mon champion */
-  matchup: { wins: number; losses: number; sample: number };
-  /**
-   * "Pic observé" LOCAL par Hexgate au fil de vos rencontres — PAS un vrai
-   * historique Riot (non exposé par l'API). Grandit au fil du temps.
-   */
-  peak: { tier?: string; division?: string | null; lp?: number; seen_count: number };
-}
-
 /** Connexion SSE UNIQUE par fenêtre, multiplexée vers tous les abonnés.
  * Avant : chaque appel ouvrait sa propre EventSource (la fenêtre principale en
  * cumulait 2-3) — autant de threads bloqués côté backend et de parsing dupliqué.
@@ -552,11 +538,18 @@ export interface LiveGameOpponentInsight {
 let _sse: EventSource | null = null;
 const _sseSubs = new Set<(e: ServerEvent) => void>();
 
-export function subscribeEvents(onEvent: (e: ServerEvent) => void): () => void {
-  _sseSubs.add(onEvent);
-  if (!_sse) {
-    _sse = new EventSource(`${BASE}/events`);
-    _sse.onmessage = (msg) => {
+let _sseOpening = false;
+
+/** Ouvre le flux d'événements. EventSource ne sait pas envoyer d'en-tête : le
+ * jeton passe en paramètre d'URL (accepté par le backend pour `/events` seul). */
+function openEvents(refreshToken = false): void {
+  if (_sse || _sseOpening || _sseSubs.size === 0) return;
+  _sseOpening = true;
+  void apiToken(refreshToken).then((token) => {
+    _sseOpening = false;
+    if (_sse || _sseSubs.size === 0) return;
+    const es = new EventSource(`${BASE}/events?token=${encodeURIComponent(token ?? "")}`);
+    es.onmessage = (msg) => {
       let parsed: ServerEvent;
       try {
         parsed = JSON.parse(msg.data);
@@ -565,7 +558,22 @@ export function subscribeEvents(onEvent: (e: ServerEvent) => void): () => void {
       }
       _sseSubs.forEach((fn) => fn(parsed));
     };
-  }
+    es.onerror = () => {
+      // Coupure réseau : EventSource se reconnecte seul (état CONNECTING).
+      // Refus 401 (backend redémarré, nouveau jeton) : il abandonne pour de
+      // bon (CLOSED) — on rouvre avec un jeton relu.
+      if (es.readyState === EventSource.CLOSED && _sse === es) {
+        _sse = null;
+        window.setTimeout(() => openEvents(true), 2000);
+      }
+    };
+    _sse = es;
+  });
+}
+
+export function subscribeEvents(onEvent: (e: ServerEvent) => void): () => void {
+  _sseSubs.add(onEvent);
+  openEvents();
   return () => {
     _sseSubs.delete(onEvent);
     if (_sseSubs.size === 0 && _sse) {

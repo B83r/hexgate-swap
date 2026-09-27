@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Eye, Gamepad2, Info, Save, Settings2, Swords } from "lucide-react";
+import { Gamepad2, Info, Save, Settings2, Swords } from "lucide-react";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
 } from "@/components/ui/dialog";
@@ -10,7 +10,6 @@ import { GeneralTab } from "./settings/GeneralTab";
 import { ClientTab } from "./settings/ClientTab";
 import { GameTab } from "./settings/GameTab";
 import { DataTab } from "./settings/DataTab";
-import { OverlayView } from "./OverlayView";
 import { AboutTab } from "./settings/AboutTab";
 
 interface Props {
@@ -23,18 +22,13 @@ interface Props {
 
 // Échange du 12/09/2026 : les actions ponctuelles sur le client (« Outils »)
 // ont quitté ce dialogue pour un onglet principal — ce ne sont pas des
-// réglages, les ranger ici les rendait introuvables. L'overlay a fait le
-// chemin inverse : il occupait un onglet principal alors qu'on le configure
-// une fois puis qu'on l'oublie. Voir `components/ToolsView.tsx`.
-type TabId = "general" | "client" | "game" | "overlay" | "data" | "about";
+// réglages, les ranger ici les rendait introuvables. Voir `components/ToolsView.tsx`.
+type TabId = "general" | "client" | "game" | "data" | "about";
 
 const TABS: { id: TabId; labelKey: string; Icon: typeof Settings2 }[] = [
   { id: "general", labelKey: "set.tab.general", Icon: Settings2 },
   { id: "client", labelKey: "set.tab.client", Icon: Gamepad2 },
   { id: "game", labelKey: "set.tab.game", Icon: Swords },
-  // Réutilise `nav.overlay` : le libellé existe déjà dans les 6 langues depuis
-  // l'époque où l'overlay était un onglet principal.
-  { id: "overlay", labelKey: "nav.overlay", Icon: Eye },
   { id: "data", labelKey: "set.tab.data", Icon: Save },
   { id: "about", labelKey: "set.tab.about", Icon: Info },
 ];
@@ -87,7 +81,6 @@ export function SettingsDialog({ open, onOpenChange, accounts, streamerMode, onT
             {tab === "client" && <ClientTab open={open} />}
             {tab === "game" && <GameTab open={open} />}
             {tab === "data" && <DataTab open={open} accounts={accounts} />}
-            {tab === "overlay" && <OverlayView />}
             {tab === "about" && <AboutTab />}
           </div>
         </div>

@@ -90,9 +90,17 @@ class RankWatcher(threading.Thread):
         old_solo = (account.rank or {}).get("solo")
         new_solo = rank.get("solo")
 
+        # La région passe par ici aussi : une fiche restée à « ? » se répare
+        # toute seule dès que son compte est connecté, sans attendre un swap.
+        try:
+            region = lcu_api.region()
+        except lcu_api.LeagueNotRunning:
+            region = None
+
         lp_delta = vault.update_profile(
             name, riot_id=summoner["riot_id"], level=summoner.get("level"),
             rank=rank, icon_id=summoner.get("icon_id"), puuid=summoner.get("puuid"),
+            region=region,
         )
         self._on_profile_updated()
 

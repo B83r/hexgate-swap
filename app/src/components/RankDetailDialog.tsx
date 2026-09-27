@@ -394,7 +394,7 @@ export function RankDetailDialog({ account, onClose }: Props) {
                           transition={{ duration: 1.5, repeat: Infinity, ease: "easeInOut" }}
                           className="text-[#3ddc97]"
                         >
-                          {solo.wins} W
+                          {solo.wins} {wlLetters(lang).w}
                         </motion.span>
                         <span className="text-muted/40">|</span>
                         <motion.span
@@ -402,7 +402,7 @@ export function RankDetailDialog({ account, onClose }: Props) {
                           transition={{ duration: 1.5, repeat: Infinity, ease: "easeInOut", delay: 0.75 }}
                           className="text-[#e05c5c]"
                         >
-                          {solo.losses} L
+                          {solo.losses} {wlLetters(lang).l}
                         </motion.span>
                         {wrPct !== null && (
                           <span className="ml-1 text-muted">

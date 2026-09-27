@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { useI18n } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
-/** Interrupteur : le curseur glisse de la droite vers la gauche à l'activation
+/** Interrupteur : le curseur glisse de la gauche vers la droite à l'activation (convention Windows/mobile)
  * (animation `layout` de framer-motion). Historiquement « StreamerToggle », il
  * sert en réalité à TOUS les réglages booléens — d'où le renommage. */
 export function Toggle({ checked, onToggle }: { checked: boolean; onToggle: () => void }) {
@@ -16,7 +16,7 @@ export function Toggle({ checked, onToggle }: { checked: boolean; onToggle: () =
       onClick={onToggle}
       className={cn(
         "relative flex h-6 w-11 shrink-0 items-center rounded-full border px-0.5 transition-colors duration-300",
-        checked ? "justify-start border-hextech-blue/70 bg-hextech-blue/25" : "justify-end border-border bg-border/40",
+        checked ? "justify-end border-hextech-blue/70 bg-hextech-blue/25" : "justify-start border-border bg-border/40",
       )}
     >
       <motion.span

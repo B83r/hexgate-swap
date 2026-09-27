@@ -50,8 +50,10 @@ function hexPoints(cx: number, cy: number, r: number): string {
   }).join(" ");
 }
 
-export function Header({ penaltySeconds, product, productStatus, onProductChange }: {
+export function Header({ penaltySeconds, product, productStatus, onProductChange, swapping = false }: {
   penaltySeconds?: number | null;
+  /** Un swap est en cours : c'est le seul moment où le logo tourne. */
+  swapping?: boolean;
   product: Product;
   productStatus: ProductStatus;
   onProductChange: (product: Product) => void;
@@ -84,12 +86,31 @@ export function Header({ penaltySeconds, product, productStatus, onProductChange
   }, []);
 
   useEffect(() => {
-    api.getPingServers()
-      .then((r) => {
-        setServers(r.servers);
-        setRegion((cur) => cur ?? r.selected);
-      })
-      .catch(() => {});
+    // Au tout premier démarrage de la fenêtre, le sidecar backend peut ne pas
+    // avoir fini de s'initialiser : une tentative ratée ne se relançait
+    // jamais (`.catch` avalait l'échec), et `servers` restait vide pour toute
+    // la durée de vie de la fenêtre — le sélecteur affichait bien le ping en
+    // direct (poussé par SSE), mais cliquer dessus ne montrait plus jamais le
+    // menu (constaté le 22/09/2026). On retente donc toutes les 3 s tant que
+    // la liste n'a pas été obtenue.
+    let cancelled = false;
+    let timer: number | undefined;
+    const tryLoad = () => {
+      api.getPingServers()
+        .then((r) => {
+          if (cancelled) return;
+          setServers(r.servers);
+          setRegion((cur) => cur ?? r.selected);
+        })
+        .catch(() => {
+          if (!cancelled) timer = window.setTimeout(tryLoad, 3000);
+        });
+    };
+    tryLoad();
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
+    };
   }, []);
 
   useEffect(() => () => {
@@ -142,12 +163,12 @@ export function Header({ penaltySeconds, product, productStatus, onProductChange
       <Banner />
       <WindowControls />
       <div data-tauri-drag-region className="pointer-events-none relative flex h-full items-center justify-center gap-3.5 px-6">
-        <Logo size={58} anim={windowActive && !lowPower ? "spin" : "none"} />
+        <Logo size={58} anim={swapping && windowActive && !lowPower ? "spin" : "none"} />
         <div className="flex flex-col items-start gap-1.5">
           <h1 className="text-[19px] font-bold tracking-[0.06em] text-gold flex items-center gap-2">
             HEXGATE&nbsp;&nbsp;SWAP
           {penalty !== null && (
-            <div className="pointer-events-auto flex items-center border border-red/40 bg-red/10 px-2 py-0.5 rounded-full text-red text-[8px] font-extrabold uppercase tracking-wider ml-1 animate-pulse fx-decor" title={t("header.dodgePenalty")}>
+            <div className="pointer-events-auto flex items-center border border-red/40 bg-red/10 px-2 py-0.5 rounded-full text-red text-[11px] font-extrabold uppercase tracking-wider ml-1 animate-pulse fx-decor" title={t("header.dodgePenalty")}>
               Dodge : {formatTime(penalty)}
             </div>
           )}
@@ -164,10 +185,10 @@ export function Header({ penaltySeconds, product, productStatus, onProductChange
                 }
               >
                 <span className={cn(
-                  "h-1.5 w-1.5 rounded-full animate-pulse fx-decor",
+                  "h-1.5 w-1.5 rounded-full",
                   latency === null ? "bg-muted" : pingColor(latency),
                 )} />
-                <span className="text-[7.5px] font-bold text-muted uppercase tracking-wider select-none">
+                <span className="text-[11px] font-bold text-muted uppercase tracking-wider select-none">
                   {latency === null ? "…" : latency === -1 ? "Ping --" : `${ping?.estimated ? "≈" : ""}${latency} ms`}
                 </span>
               </div>
@@ -175,7 +196,6 @@ export function Header({ penaltySeconds, product, productStatus, onProductChange
               {/* Le libellé du serveur est le déclencheur du sélecteur. */}
               <button
                 ref={anchorRef}
-                onMouseEnter={openPicker}
                 onMouseLeave={schedulePickerClose}
                 onClick={(e) => {
                   e.stopPropagation();
@@ -184,8 +204,7 @@ export function Header({ penaltySeconds, product, productStatus, onProductChange
                   // dans le même geste. La fermeture reste le départ du curseur.
                   openPicker();
                 }}
-                title={t("header.pingServerPicker")}
-                className="pointer-events-auto text-[6.5px] font-extrabold uppercase tracking-wider select-none leading-none mt-0.5 transition hover:brightness-125"
+                className="pointer-events-auto text-[11px] font-extrabold uppercase tracking-wider select-none leading-none mt-0.5 transition hover:brightness-125"
                 style={{
                   color: "#c8aa6e",
                   textShadow: "0 0 4px rgba(200, 170, 110, 0.6)",
@@ -214,7 +233,7 @@ export function Header({ penaltySeconds, product, productStatus, onProductChange
                     }}
                     className="fixed z-[100] max-h-[min(60vh,320px)] w-[176px] -translate-x-1/2 overflow-y-auto rounded-lg border border-border/80 bg-[#060c16]/95 p-1 shadow-2xl backdrop-blur-md"
                   >
-                    <div className="border-b border-border/20 px-1.5 pb-1 pt-0.5 text-[8px] font-extrabold uppercase tracking-wider text-gold-dim">
+                    <div className="border-b border-border/20 px-1.5 pb-1 pt-0.5 text-[11px] font-extrabold uppercase tracking-wider text-gold-dim">
                       {t("header.pingServerPicker")}
                     </div>
                     {servers.map((s) => (
@@ -226,8 +245,8 @@ export function Header({ penaltySeconds, product, productStatus, onProductChange
                           s.id === region ? "bg-gold/15 text-gold" : "text-muted hover:bg-card-hover hover:text-text",
                         )}
                       >
-                        <span className="text-[9px] font-extrabold uppercase tracking-wider">{s.label}</span>
-                        <span className="truncate text-[8px] opacity-70">{s.city}</span>
+                        <span className="text-[11px] font-extrabold uppercase tracking-wider">{s.label}</span>
+                        <span className="truncate text-[11px] opacity-70">{s.city}</span>
                       </button>
                     ))}
                   </div>,
@@ -241,7 +260,7 @@ export function Header({ penaltySeconds, product, productStatus, onProductChange
               const active = product === id;
               const running = productStatus[id] !== "none";
               return <button key={id} onClick={() => onProductChange(id)} className={cn(
-                "relative flex items-center gap-1.5 rounded-md px-3 text-[9px] font-black tracking-wider transition-all",
+                "relative flex items-center gap-1.5 rounded-md px-3 text-[11px] font-black tracking-wider transition-all",
                 active ? id === "valorant" ? "bg-[#7f2330] text-white" : "bg-gold text-[#0a0f14]" : "text-muted hover:text-text",
               )}>
                 {id === "valorant" ? (

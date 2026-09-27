@@ -26,6 +26,9 @@ export function DataTab({ open, accounts }: { open: boolean; accounts: Account[]
   const [selected, setSelected] = useState<Set<string>>(() => new Set(accounts.map((a) => a.name)));
   const [cloudPath, setCloudPath] = useState("");
   const [cloudPwd, setCloudPwd] = useState("");
+  // Le mot de passe cloud n'est plus jamais renvoyé par le backend (chiffré
+  // DPAPI depuis le 23/09/2026) : on sait seulement s'il est défini.
+  const [cloudPwdConfigured, setCloudPwdConfigured] = useState(false);
   const [exportPwd, setExportPwd] = useState("");
   const [exportPwd2, setExportPwd2] = useState("");
   const [exporting, setExporting] = useState(false);
@@ -35,6 +38,9 @@ export function DataTab({ open, accounts }: { open: boolean; accounts: Account[]
   const [henrikKey, setHenrikKey] = useState("");
   const [henrikConfigured, setHenrikConfigured] = useState(false);
   const [savingHenrik, setSavingHenrik] = useState(false);
+  const [riotKey, setRiotKey] = useState("");
+  const [riotConfigured, setRiotConfigured] = useState(false);
+  const [savingRiot, setSavingRiot] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -43,10 +49,16 @@ export function DataTab({ open, accounts }: { open: boolean; accounts: Account[]
     api.getCloudBackup()
       .then((res) => {
         setCloudPath(res.path || "");
-        setCloudPwd(res.password || "");
+        setCloudPwd("");
+        setCloudPwdConfigured(res.password_configured);
       })
       .catch(console.error);
-    api.getSettingsAll().then((values) => setHenrikConfigured(values.henrikdev_configured)).catch(console.error);
+    api.getSettingsAll()
+      .then((values) => {
+        setHenrikConfigured(values.henrikdev_configured);
+        setRiotConfigured(values.riot_api_key_configured);
+      })
+      .catch(console.error);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
@@ -72,12 +84,28 @@ export function DataTab({ open, accounts }: { open: boolean; accounts: Account[]
     }
   };
 
+  const saveRiotKey = async () => {
+    setSavingRiot(true);
+    try {
+      await api.updateSettings({ riot_api_key: riotKey });
+      setRiotConfigured(Boolean(riotKey.trim()));
+      setRiotKey("");
+      toast.success(t("riot.api.saved"));
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSavingRiot(false);
+    }
+  };
+
   const saveCloud = async () => {
     try {
       await api.setCloudBackup(cloudPath || null, cloudPwd || undefined);
+      if (cloudPwd) setCloudPwdConfigured(true);
+      setCloudPwd("");
       toast.success(t("set.cloudSaved"));
     } catch (e) {
-      toast.error(String(e));
+      toast.error(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -150,6 +178,24 @@ export function DataTab({ open, accounts }: { open: boolean; accounts: Account[]
         </div>
         {henrikConfigured && <span className="text-[10px] font-bold text-green">✓ {t("val.api.configured")}</span>}
       </Row>
+      <GroupTitle>{t("riot.api.title")}</GroupTitle>
+      <Row title={t("riot.api.key")} desc={t("riot.api.desc")} icon={<ShieldHalf className="h-4 w-4 shrink-0 text-gold" />}>
+        <div className="flex gap-2">
+          <input
+            type="password"
+            autoComplete="off"
+            placeholder={t("riot.api.placeholder")}
+            value={riotKey}
+            onChange={(e) => setRiotKey(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") void saveRiotKey(); }}
+            className="h-9 min-w-0 flex-1 rounded-lg border border-gold-dim bg-panel px-2.5 text-[12px] text-text outline-none focus:border-gold"
+          />
+          <Button onClick={saveRiotKey} disabled={savingRiot} className="h-9 shrink-0 bg-gold text-[11px] font-bold text-black hover:bg-gold-bright">
+            {t("riot.api.save")}
+          </Button>
+        </div>
+        {riotConfigured && <span className="text-[10px] font-bold text-green">✓ {t("riot.api.configured")}</span>}
+      </Row>
       <Row title={t("set.cloud")} desc={t("set.cloudDesc")}>
         <div className="flex flex-col gap-2">
           <input
@@ -161,7 +207,7 @@ export function DataTab({ open, accounts }: { open: boolean; accounts: Account[]
           />
           <input
             type="password"
-            placeholder={t("set.cloudPwd")}
+            placeholder={cloudPwdConfigured ? t("set.cloudPwdSet") : t("set.cloudPwd")}
             value={cloudPwd}
             onChange={(e) => setCloudPwd(e.target.value)}
             className="h-9 rounded-lg border border-gold-dim bg-panel px-2.5 text-[12px] text-text outline-none focus:border-gold"

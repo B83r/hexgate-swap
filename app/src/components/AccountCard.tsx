@@ -7,7 +7,7 @@ import {
   useMotionValue,
   useSpring,
 } from "framer-motion";
-import { AlertTriangle, Ban, GripVertical, Lock, Pin, Play, Plus, RotateCw, StickyNote, Swords, X } from "lucide-react";
+import { AlertTriangle, Ban, ExternalLink, GripVertical, Lock, MoreHorizontal, Pin, Play, Plus, RotateCw, StickyNote, Swords, X } from "lucide-react";
 import type { Account, Wallet } from "@/lib/api";
 import { api, avatarUrl, rankEmblemUrl } from "@/lib/api";
 import { queueDetails, rankInfo, wlLetters } from "@/lib/rank";
@@ -17,7 +17,6 @@ import { cn } from "@/lib/utils";
 import { profileIconUrl, useDdragonVersion } from "@/lib/ddragon";
 import { useWindowActive } from "@/lib/useWindowActive";
 import { useLowPower } from "@/lib/useLowPower";
-import { BorderBeam } from "./fx/BorderBeam";
 import { NumberTicker } from "./fx/NumberTicker";
 import { MagneticButton } from "./fx/MagneticButton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
@@ -105,9 +104,10 @@ function AccountCardImpl({
   }, [launching, idlePhase]);
   const info = rankInfo(acc, lang);
   const display = acc.riot_id || acc.name;
+  const [gameName, tagLine] = display.includes("#") ? [display.slice(0, display.lastIndexOf("#")), display.slice(display.lastIndexOf("#") + 1)] : [display, ""];
   const ring = acc.active ? "#c8aa6e" : acc.expired ? "#e05c5c" : "#785a28";
-  // `reduced` coupe les animations permanentes de la carte (border-beam, halo
-  // pulsant, tilt, spotlight). Actif aussi quand la fenêtre n'est pas regardée
+  // `reduced` coupe les animations permanentes de la carte (halo pulsant, tilt,
+  // spotlight). Actif aussi quand la fenêtre n'est pas regardée
   // (partie en cours) et en mode Basse consommation.
   const windowActive = useWindowActive();
   const lowPower = useLowPower();
@@ -201,7 +201,7 @@ function AccountCardImpl({
       className={cn(
         "group relative grid grid-cols-[74px_minmax(0,1fr)_176px_178px] items-center overflow-hidden rounded-2xl border bg-card px-2 py-3 cursor-pointer transition-colors",
         acc.active
-          ? "border-gold/60"
+          ? "border-gold/60 shadow-[0_0_14px_rgba(200,170,110,0.18)]"
           : selected
             ? "border-hextech-blue"
             : "border-border hover:border-border-hover",
@@ -234,9 +234,6 @@ function AccountCardImpl({
         </>
       )}
 
-      {/* bordure animée pour le compte actif */}
-      {acc.active && !reduced && <BorderBeam color="#c8aa6e" duration={4.5} />}
-
       {/* poignée de drag + épingle favori, discrètes (visibles au survol) */}
       <div className="absolute left-1.5 top-1.5 z-20 flex items-center gap-0.5">
         <button
@@ -268,7 +265,8 @@ function AccountCardImpl({
       {/* ---- contenu ---- */}
       <div className="relative z-10 flex justify-center">
         <div className="relative h-12 w-12 flex items-center justify-center">
-          <img
+          <motion.img
+            layoutId={`account-avatar-${acc.name}`}
             src={avatarSrc}
             onError={() => setAvatarSrc(avatarUrl(acc.icon_id, display[0] ?? "?", ring))}
             alt=""
@@ -278,19 +276,7 @@ function AccountCardImpl({
             style={{ borderColor: ring }}
           />
           {acc.level != null && (
-            <img
-              src={`/assets/riot/communitydragon/profile-borders/theme-${levelBorderTheme(acc.level)}-border.png`}
-              alt=""
-              decoding="async"
-              loading="lazy"
-              className="absolute -inset-2.5 h-[68px] w-[68px] max-w-none pointer-events-none select-none z-10"
-              onError={(e) => {
-                (e.target as HTMLImageElement).style.display = "none";
-              }}
-            />
-          )}
-          {acc.level != null && (
-            <span className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 rounded border border-gold-dim bg-[#0a1428] px-1 text-[8px] font-bold text-gold select-none leading-none py-0.5 z-20">
+            <span className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 rounded border border-gold-dim bg-[#0a1428] px-1 text-[11px] font-bold text-gold select-none leading-none py-0.5 z-20">
               {acc.level}
             </span>
           )}
@@ -301,27 +287,24 @@ function AccountCardImpl({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5 min-w-0">
             <div
-              className={cn("truncate font-semibold text-text", blurred && "blur-[6px] select-none")}
+              className={cn("flex min-w-0 items-baseline gap-1 truncate font-semibold text-text", blurred && "blur-[6px] select-none")}
             >
-              {display}
+              <span className="truncate">{gameName}</span>
+              {tagLine && <span className="shrink-0 text-[11px] font-medium text-muted">#{tagLine}</span>}
             </div>
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                api.openUrl(opggUrl(acc));
-              }}
-              className="px-1 py-0.5 rounded border border-gold/40 bg-gold/5 text-[7px] font-extrabold text-gold hover:bg-gold hover:text-black transition-colors select-none shrink-0 cursor-pointer"
-              title={t("card.opggProfile")}
-            >
-              OP.GG
-            </button>
+            <CardMenu
+              hasNote={!!acc.note}
+              onOpgg={() => api.openUrl(opggUrl(acc))}
+              onNote={() => onEditNote(acc.name)}
+              t={t}
+            />
             {acc.active && gameflowPhase === "InProgress" && (
               <button
                 onClick={(e) => {
                   e.stopPropagation();
                   api.openUrl(opggUrl(acc, true));
                 }}
-                className="px-1.5 py-0.5 rounded border border-gold bg-gold/15 text-[7px] font-extrabold text-gold hover:bg-gold hover:text-black transition-all select-none shrink-0 cursor-pointer animate-pulse shadow-[0_0_8px_rgba(200,170,110,0.5)]"
+                className="px-1.5 py-0.5 rounded border border-gold bg-gold/15 text-[11px] font-extrabold text-gold hover:bg-gold hover:text-black transition-all select-none shrink-0 cursor-pointer animate-pulse shadow-[0_0_8px_rgba(200,170,110,0.5)]"
                 title={t("card.opggLive")}
               >
                 LIVE GAME
@@ -353,7 +336,7 @@ function AccountCardImpl({
             return (
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <div className="mt-0.5 flex items-center gap-2.5 text-[9.5px] font-semibold text-muted select-none">
+                  <div className="mt-0.5 flex items-center gap-2.5 text-[11px] font-semibold text-muted select-none">
                     <span className="flex items-center gap-1 text-hextech-blue">
                       <img src={beIcon} alt="" className="h-3.5 w-3.5 object-contain" />
                       {formatCurrency(walletToShow.blue_essence)}
@@ -371,7 +354,7 @@ function AccountCardImpl({
             );
           })()}
         </div>
-        <NoteBadge note={acc.note} blurred={blurred} onClick={() => onEditNote(acc.name)} />
+        {acc.note && <NoteBadge note={acc.note} blurred={blurred} onClick={() => onEditNote(acc.name)} />}
       </div>
 
       <RankBlock
@@ -390,14 +373,14 @@ function AccountCardImpl({
               selectedId={selectedQueue}
               onChange={setSelectedQueue}
             />
-            <span className="text-[7px] font-extrabold text-gold uppercase tracking-wider select-none font-mono text-center leading-none mt-0.5">
+            <span className="text-[11px] font-extrabold text-gold uppercase tracking-wider select-none font-mono text-center leading-none mt-0.5">
               {queueLabel(QUEUES.find((q) => q.id === selectedQueue) ?? QUEUES[0], t, true)}
             </span>
           </div>
         )}
         {acc.active ? (
           gameflowPhase === "InProgress" ? (
-            <span className="flex h-[34px] w-[92px] items-center justify-center rounded-full border border-red bg-[#2a0e10] text-[10px] font-bold text-red animate-pulse">
+            <span className="flex h-[34px] w-[92px] items-center justify-center rounded-full border border-red bg-[#2a0e10] text-[11px] font-bold text-red animate-pulse">
               {t("card.inGame")}
             </span>
           ) : launching ? (
@@ -406,7 +389,7 @@ function AccountCardImpl({
             <MagneticButton className="relative flex shrink-0">
               <button
                 disabled
-                className="play-btn relative flex h-[34px] items-center justify-center gap-1 overflow-hidden whitespace-nowrap rounded-full bg-gold px-3 text-[9.5px] font-bold text-[#0a0f14] opacity-80"
+                className="play-btn relative flex h-[34px] items-center justify-center gap-1 overflow-hidden whitespace-nowrap rounded-full bg-gold px-3 text-[11px] font-bold text-[#0a0f14] opacity-80"
               >
                 <RotateCw className="h-3.5 w-3.5 shrink-0 animate-spin" />
                 …
@@ -414,21 +397,21 @@ function AccountCardImpl({
             </MagneticButton>
           ) : gameflowPhase === "ChampSelect" ? (
             <div className="flex flex-col items-center gap-1">
-              <span className="flex h-[26px] w-[92px] items-center justify-center rounded-full border border-purple bg-[#1a0e2a] text-[10px] font-bold text-purple animate-pulse">
+              <span className="flex h-[26px] w-[92px] items-center justify-center rounded-full border border-purple bg-[#1a0e2a] text-[11px] font-bold text-purple animate-pulse">
                 {t("card.champSelect")}
               </span>
               {onDodge && <LeaveButton onClick={onDodge} label={t("card.leave")} />}
             </div>
           ) : gameflowPhase === "Matchmaking" ? (
             <div className="flex flex-col items-center gap-1">
-              <span className="flex h-[26px] w-[92px] items-center justify-center rounded-full border border-hextech-blue bg-[#0a1e2a] text-[10px] font-bold text-hextech-blue animate-pulse">
+              <span className="flex h-[26px] w-[92px] items-center justify-center rounded-full border border-hextech-blue bg-[#0a1e2a] text-[11px] font-bold text-hextech-blue animate-pulse">
                 {t("card.inQueue")}
               </span>
               {onDodge && <LeaveButton onClick={onDodge} label={t("card.leave")} />}
             </div>
           ) : gameflowPhase === "Lobby" ? (
             <div className="flex flex-col items-center gap-1">
-              <span className="flex h-[26px] w-[92px] items-center justify-center rounded-full border border-gold-dim bg-[#1a1608] text-[10px] font-bold text-gold">
+              <span className="flex h-[26px] w-[92px] items-center justify-center rounded-full border border-gold-dim bg-[#1a1608] text-[11px] font-bold text-gold">
                 {t("card.inLobby")}
               </span>
               {onDodge && <LeaveButton onClick={onDodge} label={t("card.leave")} />}
@@ -437,7 +420,7 @@ function AccountCardImpl({
             <MagneticButton className="relative flex shrink-0">
               <button
                 onClick={handleLaunch}
-                className="play-btn relative flex h-[34px] items-center justify-center gap-1 overflow-hidden whitespace-nowrap rounded-full bg-gold px-2.5 text-[9.5px] font-bold text-[#0a0f14] transition-all hover:shadow-[0_0_20px_rgba(200,170,110,0.6)] active:scale-95"
+                className="play-btn relative flex h-[34px] items-center justify-center gap-1 overflow-hidden whitespace-nowrap rounded-full bg-gold px-2.5 text-[11px] font-bold text-[#0a0f14] transition-all hover:shadow-[0_0_20px_rgba(200,170,110,0.6)] active:scale-95"
               >
                 <Play className="h-3.5 w-3.5 shrink-0 fill-current" />
                 {t("card.launch", { queue: queueLabel(QUEUES.find((q) => q.id === selectedQueue) ?? QUEUES[0], t, true) })}
@@ -455,7 +438,7 @@ function AccountCardImpl({
               e.stopPropagation();
               onReconnect(acc.name, selectedQueue || undefined);
             }}
-            className="relative flex h-[34px] w-[104px] items-center justify-center gap-1 overflow-hidden rounded-full border border-red bg-[#2a1216] text-[10px] font-bold tracking-tight text-red transition-colors disabled:opacity-60"
+            className="relative flex h-[34px] w-[104px] items-center justify-center gap-1 overflow-hidden rounded-full border border-red bg-[#2a1216] text-[11px] font-bold tracking-tight text-red transition-colors disabled:opacity-60"
           >
             <RotateCw className={cn("h-3 w-3 shrink-0", reconnecting && "animate-spin")} />
             {reconnecting ? "…" : t("card.reconnect")}
@@ -494,10 +477,62 @@ function LeaveButton({ onClick, label }: { onClick: () => void; label: string })
         e.stopPropagation();
         onClick();
       }}
-      className="text-[8px] font-bold uppercase tracking-wider text-red/70 hover:text-red underline decoration-dotted underline-offset-2"
+      className="text-[11px] font-bold uppercase tracking-wider text-red/70 hover:text-red underline decoration-dotted underline-offset-2"
     >
       {label}
     </button>
+  );
+}
+
+/** Menu ⋯ de la carte : actions secondaires (OP.GG, note) regroupées pour ne plus
+ * encombrer le nom du compte. Rendu dans un portail : la carte est `overflow-hidden`. */
+function CardMenu({ hasNote, onOpgg, onNote, t }: { hasNote: boolean; onOpgg: () => void; onNote: () => void; t: TFunc }) {
+  const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
+  useEffect(() => {
+    if (!pos) return;
+    const close = () => setPos(null);
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+    };
+  }, [pos]);
+  const item = "flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[12px] text-text hover:bg-card-hover";
+  return (
+    <>
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          const r = e.currentTarget.getBoundingClientRect();
+          setPos(pos ? null : { x: r.left, y: r.bottom + 4 });
+        }}
+        aria-label={t("card.menu")}
+        aria-haspopup="menu"
+        className="shrink-0 cursor-pointer rounded p-0.5 text-muted opacity-0 transition-opacity hover:text-gold focus-visible:opacity-100 group-hover:opacity-70"
+      >
+        <MoreHorizontal className="h-3.5 w-3.5" />
+      </button>
+      {pos &&
+        createPortal(
+          <div
+            role="menu"
+            onPointerDown={(e) => e.stopPropagation()}
+            style={{ position: "fixed", top: pos.y, left: Math.min(pos.x, window.innerWidth - 190), zIndex: 60 }}
+            className="w-44 rounded-lg border border-border bg-[#0a1428] p-1 shadow-xl"
+          >
+            <button role="menuitem" className={item} onClick={(e) => { e.stopPropagation(); setPos(null); onOpgg(); }}>
+              <ExternalLink className="h-3.5 w-3.5 text-gold" /> {t("card.opggProfile")}
+            </button>
+            <button role="menuitem" className={item} onClick={(e) => { e.stopPropagation(); setPos(null); onNote(); }}>
+              <StickyNote className="h-3.5 w-3.5 text-gold" /> {hasNote ? t("card.editNote") : t("card.addNote")}
+            </button>
+          </div>,
+          document.body,
+        )}
+    </>
   );
 }
 
@@ -559,7 +594,7 @@ function RankBlock({
   blurred?: boolean;
   onOpenRankDetail: () => void;
 }) {
-  const { lang } = useI18n();
+  const { t, lang } = useI18n();
   const wl = wlLetters(lang);
   const lpPct = info.lp != null ? Math.min(info.lp, 100) / 100 : 0;
   const details = queueDetails(acc, lang);
@@ -614,11 +649,11 @@ function RankBlock({
         <div className="truncate text-sm font-bold leading-tight" style={{ color: info.color }}>
           {info.main}
         </div>
-        <div className="truncate text-[10px] text-muted">
+        <div className="truncate text-[11px] text-muted">
           {info.lp != null ? (
             <>
               <NumberTicker value={info.lp} /> LP
-              {info.winrate !== null && ` · ${info.wins}${wl.w} ${info.losses}${wl.l}`}
+              {info.winrate !== null && ` · ${info.wins}${wl.w} ${info.losses}${wl.l} · ${t("stat.winrate", { n: Math.round(info.winrate * 100) })}`}
             </>
           ) : (
             info.detail || "—"
@@ -643,10 +678,10 @@ function RankBlock({
   return (
     <Tooltip>
       <TooltipTrigger asChild>{block}</TooltipTrigger>
-      <TooltipContent side="top" className="w-56">
+      <TooltipContent side="bottom" className="w-56">
         <div
           className={cn(
-            "mb-1.5 text-[10px] font-bold uppercase tracking-wider text-gold",
+            "mb-1.5 text-[11px] font-bold uppercase tracking-wider text-gold",
             blurred && "blur-[6px] select-none",
           )}
         >
@@ -661,7 +696,7 @@ function RankBlock({
                   {d.rankText}
                 </span>
               </div>
-              <div className="mt-0.5 flex items-center justify-between text-[10px] text-muted">
+              <div className="mt-0.5 flex items-center justify-between text-[11px] text-muted">
                 <span>{d.lp} LP</span>
                 <span>
                   {d.wins}{wl.w} {d.losses}{wl.l}
@@ -698,12 +733,6 @@ const CREST_BASE = `${LOCAL_RIOT_ASSETS}/ranked-mini-crests`;
 // Arena est saisonnier : son dossier `cherry` disparaît parfois de `latest`.
 // Cette version conserve l'asset officiel et l'URL versionnée est immuable.
 const ARENA_ICON = `${LOCAL_RIOT_ASSETS}/game-modes/arena.png`;
-
-function levelBorderTheme(level: number): number {
-  const thresholds = [500, 475, 450, 425, 400, 375, 350, 325, 300, 275, 250, 225, 200, 175, 150, 125, 100, 75, 50, 30, 1];
-  const descendingIndex = thresholds.findIndex((minimum) => level >= minimum);
-  return descendingIndex < 0 ? 1 : 21 - descendingIndex;
-}
 
 /** Mini-crest officiel du tier (ranked-mini-crests), unranked si pas de rang. */
 function tierCrestUrl(tier?: string | null): string {
@@ -915,7 +944,7 @@ function QueueSelector({
 
                     {/* Glowing label text underneath the button */}
                     <span 
-                      className="absolute top-[38px] left-1/2 -translate-x-1/2 whitespace-nowrap text-[8.5px] font-extrabold tracking-wider uppercase font-mono select-none pointer-events-none"
+                      className="absolute top-[38px] left-1/2 -translate-x-1/2 whitespace-nowrap text-[11px] font-extrabold tracking-wider uppercase font-mono select-none pointer-events-none"
                       style={{ 
                         color: "#c8aa6e",
                         textShadow: "0 0 6px rgba(200,170,110,0.8)",

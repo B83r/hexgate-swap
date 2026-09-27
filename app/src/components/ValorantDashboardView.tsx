@@ -27,18 +27,21 @@ export function ValorantDashboardView({ accounts, refreshing, onRefresh }: {
             <article key={account.name} className={cn("rounded-2xl border bg-[#110c12]/90 p-4", account.active ? "border-[#d9aa58]" : "border-[#512a31]")}>
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
-                  <h2 className="truncate text-[15px] font-extrabold text-[#f5e9e9]">{account.riot_id || account.name}</h2>
-                  <p className="mt-0.5 text-[10px] font-bold uppercase tracking-wider text-[#d9aeb3]">{account.active ? t("card.connected") : "VALORANT"}</p>
+                  <h2 className="flex items-center gap-2 truncate text-[15px] font-extrabold text-[#f5e9e9]">
+                    <span className="truncate">{account.riot_id || account.name}</span>
+                    {account.active && <span className="shrink-0 rounded-full border border-green/40 bg-[#0e2a1e] px-1.5 py-0.5 text-[11px] font-bold text-green">{t("card.connected")}</span>}
+                  </h2>
+                  <p className="mt-0.5 text-[11px] font-bold uppercase tracking-wider text-[#d9aeb3]">VALORANT</p>
                 </div>
                 <button onClick={() => onRefresh(account.name)} disabled={refreshing === account.name} className="rounded-lg border border-[#70303b] p-2 text-[#ff7180] transition hover:border-[#ff4655] disabled:opacity-50" title={t("val.dashboard.refresh")}>
                   <RefreshCw className={cn("h-3.5 w-3.5", refreshing === account.name && "animate-spin")} />
                 </button>
               </div>
               {stats ? <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
-                <Metric icon={<Trophy className="h-3.5 w-3.5" />} label={rank?.label || "—"} value={rank?.rr !== null && rank?.rr !== undefined ? `${rank.rr} RR` : "—"} />
+                <Metric icon={<Trophy className="h-3.5 w-3.5" />} label={rank?.label || t("dash.unranked")} value={rank?.rr !== null && rank?.rr !== undefined ? `${rank.rr} RR` : t("val.dashboard.rank")} />
                 <Metric icon={<BarChart3 className="h-3.5 w-3.5" />} label={stats.account_level !== null && stats.account_level !== undefined ? `${stats.account_level}` : "—"} value={t("val.dashboard.level")} />
                 <Metric icon={<Crosshair className="h-3.5 w-3.5" />} label={stats.top_agent || "—"} value={t("val.dashboard.agent")} />
-                <Metric icon={<BarChart3 className="h-3.5 w-3.5" />} label={`${stats.wins} V / ${stats.losses} D`} value={t("val.dashboard.history")} />
+                <Metric icon={<BarChart3 className="h-3.5 w-3.5" />} label={`${stats.wins} V · ${stats.losses} D`} value={t("val.dashboard.history")} />
               </div> : <p className="mt-4 text-[11px] text-[#a68187]">{t("val.dashboard.empty")}</p>}
             </article>
           );
@@ -50,7 +53,7 @@ export function ValorantDashboardView({ accounts, refreshing, onRefresh }: {
 
 function Metric({ icon, label, value }: { icon: ReactNode; label: string; value: string }) {
   return <div className="rounded-xl border border-[#3f252b] bg-[#170f15] px-2.5 py-2">
-    <div className="flex items-center gap-1 text-[#ff6472]">{icon}<span className="truncate text-[10px] font-bold">{label}</span></div>
-    <p className="mt-1 truncate text-[10px] font-semibold text-[#e8c9cd]">{value}</p>
+    <div className="flex items-center gap-1 text-[#ff6472]">{icon}<span className="truncate text-[11px] font-bold">{label}</span></div>
+    <p className="mt-1 truncate text-[11px] font-semibold text-[#e8c9cd]">{value}</p>
   </div>;
 }

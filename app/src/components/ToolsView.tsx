@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import {
-  ArrowLeftRight, BellOff, Dices, Eraser, Image, HeartHandshake, Keyboard, Save, Sparkles, Wrench,
+  ArrowLeftRight, BellOff, Dices, Eraser, Image, HeartHandshake, Radio, Save, Sparkles, Wrench,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { api, type Account, type IdentityField, type SwapKind, type ToolsState } from "@/lib/api";
+import {
+  api, type Account, type IdentityField, type QueueRepairState, type SwapKind, type ToolsState,
+} from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 import { Row } from "./settings/primitives";
 import { SettingsStudio } from "./SettingsStudio";
+import { ConfirmDialog, type ConfirmRequest } from "./ConfirmDialog";
 
 /** Ordre d'affichage des cases à cocher du retrait d'identité. */
 const IDENTITY_FIELDS: IdentityField[] = ["tokens", "banner", "crest", "prestige", "title"];
@@ -19,9 +22,9 @@ const IDENTITY_FIELDS: IdentityField[] = ["tokens", "banner", "crest", "prestige
  * remontait tout le sous-arbre, `SettingsStudio` perdait son état et
  * rechargeait en boucle — l'interface « s'ouvrait et se refermait »
  * (constaté le 13/09/2026). */
-function Section({ title, children }: { title: string; children: ReactNode }) {
+function Section({ title, order, children }: { title: string; order: number; children: ReactNode }) {
   return (
-    <section className="flex flex-col gap-2">
+    <section className="flex flex-col gap-2" style={{ order }}>
       <h2 className="px-0.5 text-[10px] font-bold uppercase tracking-wider text-gold/80">{title}</h2>
       {children}
     </section>
@@ -36,8 +39,14 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
  *
  * League uniquement — tout passe par l'API locale du client LoL, que VALORANT
  * n'expose pas. */
-export function ToolsView({ accounts }: { accounts: Account[] }) {
+export function ToolsView({ accounts, phase }: { accounts: Account[]; phase?: string }) {
   const { t } = useI18n();
+  // Les outils de partie passent en tête quand leur moment est venu (sélection
+  // des champions, fin de partie) ; hors de ce moment ils restent visibles mais grisés.
+  const inChampSelect = phase === "ChampSelect";
+  const postGame = phase === "PreEndOfGame" || phase === "EndOfGame" || phase === "WaitingForStats";
+  const gameOrder = inChampSelect || postGame ? 0 : 3;
+  const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [keepUnowned, setKeepUnowned] = useState(true);
   const [identity, setIdentity] = useState<IdentityField[]>([]);
@@ -45,12 +54,18 @@ export function ToolsView({ accounts }: { accounts: Account[] }) {
   const [skinId, setSkinId] = useState("");
   const [target, setTarget] = useState(accounts[0]?.name ?? "");
   const [state, setState] = useState<ToolsState | null>(null);
+  const [rms, setRms] = useState<QueueRepairState | null>(null);
 
   const reload = useCallback(async () => {
     try {
       setState(await api.toolsState());
     } catch {
       setState(null);
+    }
+    try {
+      setRms(await api.queueRepairState());
+    } catch {
+      setRms(null);
     }
   }, []);
 
@@ -135,6 +150,24 @@ export function ToolsView({ accounts }: { accounts: Account[] }) {
     }
   };
 
+  /** Bêta : rétablit la messagerie du client Riot quand la file part côté
+   * serveur sans que le client n'affiche jamais le pop « Accepter ».
+   * Déclenché à la main uniquement — jamais en automatique tant que le
+   * correctif n'a pas été validé sur plusieurs parties. */
+  const repairQueue = async () => {
+    setBusy("queue-repair");
+    try {
+      const res = await api.repairQueue();
+      if (res.ok) toast.success(t(res.lobby_recreated ? "tools.queueRepairOkLobby" : "tools.queueRepairOk"));
+      else toast.error(t("tools.queueRepairFail"));
+    } catch {
+      toast.error(t("tools.queueRepairNoClient"));
+    } finally {
+      setBusy(null);
+      void reload();
+    }
+  };
+
   const repair = async () => {
     try {
       const res = await api.repairLeague();
@@ -156,7 +189,7 @@ export function ToolsView({ accounts }: { accounts: Account[] }) {
     <div className="flex flex-col gap-4 overflow-y-auto px-4 py-3">
       <p className="text-[10.5px] leading-snug text-muted">{t("set.toolsIntro")}</p>
 
-      <Section title={t("tools.section.profile")}>
+      <Section title={t("tools.section.profile")} order={1}>
         <Row
           title={t("set.identity")}
           desc={t("set.identityDesc")}
@@ -267,34 +300,34 @@ export function ToolsView({ accounts }: { accounts: Account[] }) {
               onClick={() => runSimple("idsave", () => api.saveIdentity(target), "tools.identitySaved", "tools.identitySaveFail")}
               className={numericBtn}
             >
-              {t("tools.save")}
+              {t("tools.identitySaveBtn")}
             </Button>
             <Button
               disabled={busy !== null || !target}
               onClick={() => runSimple("idrestore", () => api.restoreIdentity(target), "tools.identityRestored", "tools.identityRestoreFail")}
               className={ghostBtn}
             >
-              {t("tools.restore")}
+              {t("tools.identityRestoreBtn")}
             </Button>
           </div>
         </Row>
       </Section>
 
-      <Section title={t("tools.section.settings")}>
+      <Section title={t("tools.section.settings")} order={2}>
         <SettingsStudio accounts={accounts.map((a) => a.name)} />
       </Section>
 
-      <Section title={t("tools.section.game")}>
+      <Section title={t("tools.section.game")} order={gameOrder}>
         <Row
           title={t("tools.honor")}
           desc={
-            state?.honor_votes != null
+            (state?.honor_votes != null
               ? t("tools.honorVotes", { n: state.honor_votes })
-              : t("tools.honorDesc")
+              : t("tools.honorDesc")) + (postGame ? "" : ` · ${t("tools.whenPost")}`)
           }
           icon={<HeartHandshake className="h-4 w-4 shrink-0 text-muted" />}
           control={
-            <Button disabled={busy !== null} onClick={honor} className={numericBtn}>
+            <Button disabled={busy !== null || !postGame} onClick={honor} className={numericBtn}>
               {t("tools.honorBtn")}
             </Button>
           }
@@ -303,14 +336,14 @@ export function ToolsView({ accounts }: { accounts: Account[] }) {
         <Row
           title={t("tools.reroll")}
           desc={
-            state?.reroll
+            (state?.reroll
               ? t("tools.rerollPoints", { n: state.reroll.current, cost: state.reroll.cost })
-              : t("tools.rerollDesc")
+              : t("tools.rerollDesc")) + (inChampSelect ? "" : ` · ${t("tools.whenChampSelect")}`)
           }
           icon={<Dices className="h-4 w-4 shrink-0 text-muted" />}
           control={
             <Button
-              disabled={busy !== null}
+              disabled={busy !== null || !inChampSelect}
               onClick={() => runSimple("reroll", api.rerollChampion, "tools.rerollOk", "tools.rerollFail")}
               className={numericBtn}
             >
@@ -354,7 +387,7 @@ export function ToolsView({ accounts }: { accounts: Account[] }) {
         </Row>
       </Section>
 
-      <Section title={t("tools.section.loot")}>
+      <Section title={t("tools.section.loot")} order={4}>
         <div className="grid grid-cols-2 gap-2">
           <Button
             disabled={busy !== null}
@@ -365,7 +398,18 @@ export function ToolsView({ accounts }: { accounts: Account[] }) {
           </Button>
           <Button
             disabled={busy !== null}
-            onClick={() => run("wards", api.disenchantWardsIcons, "set.disWardsDone", "set.disWardsNone")}
+            onClick={() =>
+              setConfirm({
+                title: t("set.disWards"),
+                description: <p>{t("tools.confirmDisenchant")}</p>,
+                confirmLabel: t("tools.confirmGo"),
+                danger: true,
+                onConfirm: () => {
+                  setConfirm(null);
+                  void run("wards", api.disenchantWardsIcons, "set.disWardsDone", "set.disWardsNone");
+                },
+              })
+            }
             className="h-11 cursor-pointer select-none rounded-xl border border-gold/30 bg-[#0e1624]/60 py-2 text-[10px] font-bold text-gold transition-all hover:border-gold hover:bg-gold/5 disabled:opacity-50"
           >
             {t("set.disWards")}
@@ -378,7 +422,16 @@ export function ToolsView({ accounts }: { accounts: Account[] }) {
             <Button
               disabled={busy !== null}
               onClick={() =>
-                run("champs", () => api.disenchantChampionShards(keepUnowned), "set.disChampsDone", "set.disChampsNone")
+                setConfirm({
+                  title: t("set.disChamps"),
+                  description: <p>{t("tools.confirmDisenchant")}</p>,
+                  confirmLabel: t("tools.confirmGo"),
+                  danger: true,
+                  onConfirm: () => {
+                    setConfirm(null);
+                    void run("champs", () => api.disenchantChampionShards(keepUnowned), "set.disChampsDone", "set.disChampsNone");
+                  },
+                })
               }
               className={numericBtn}
             >
@@ -398,39 +451,7 @@ export function ToolsView({ accounts }: { accounts: Account[] }) {
         </Row>
       </Section>
 
-      <Section title={t("tools.section.client")}>
-        <Row
-          title={t("tools.settings")}
-          desc={t("tools.settingsDesc")}
-          icon={<Keyboard className="h-4 w-4 shrink-0 text-muted" />}
-        >
-          <div className="flex flex-wrap items-center gap-2">
-            <select
-              value={target}
-              onChange={(e) => setTarget(e.target.value)}
-              className="h-8 min-w-0 flex-1 rounded-lg border border-border bg-[#050b14] px-2 text-[11px] text-text outline-none focus:border-gold/60"
-            >
-              {accounts.length === 0 && <option value="">{t("tools.noAccount")}</option>}
-              {accounts.map((a) => (
-                <option key={a.name} value={a.name}>{a.name}</option>
-              ))}
-            </select>
-            <Button
-              disabled={busy !== null || !target}
-              onClick={() => runSimple("setsave", () => api.saveGameSettings(target), "tools.settingsSaved", "tools.settingsSaveFail")}
-              className={numericBtn}
-            >
-              {t("tools.save")}
-            </Button>
-            <Button
-              disabled={busy !== null || !target}
-              onClick={() => runSimple("setrestore", () => api.restoreGameSettings(target), "tools.settingsRestored", "tools.settingsRestoreFail")}
-              className={ghostBtn}
-            >
-              {t("tools.restore")}
-            </Button>
-          </div>
-        </Row>
+      <Section title={t("tools.section.client")} order={5}>
 
         <Row
           title={t("tools.notifications")}
@@ -450,6 +471,33 @@ export function ToolsView({ accounts }: { accounts: Account[] }) {
         />
 
         <Row
+          title={t("tools.queueRepair")}
+          desc={
+            rms?.client === false
+              ? t("tools.queueRepairNoClient")
+              : rms?.mismatch
+                ? t("tools.queueRepairDetected")
+                : t("tools.queueRepairDesc")
+          }
+          icon={
+            <Radio
+              className={`h-4 w-4 shrink-0 ${rms?.mismatch ? "text-red" : "text-muted"}`}
+            />
+          }
+          control={
+            <Button
+              disabled={busy !== null || rms?.client === false}
+              onClick={repairQueue}
+              className={ghostBtn}
+            >
+              {t("tools.queueRepairBtn")}
+            </Button>
+          }
+        >
+          <p className="text-[10px] leading-snug text-muted">{t("tools.queueRepairHint")}</p>
+        </Row>
+
+        <Row
           title={t("set.repair")}
           desc={t("set.repairDesc")}
           icon={<Wrench className="h-4 w-4 shrink-0 text-muted" />}
@@ -463,6 +511,7 @@ export function ToolsView({ accounts }: { accounts: Account[] }) {
           }
         />
       </Section>
+      <ConfirmDialog request={confirm} onCancel={() => setConfirm(null)} />
     </div>
   );
 }

@@ -5,6 +5,8 @@ facile à compiler en .exe sidecar avec PyInstaller.
 """
 import base64
 import hashlib
+import hmac
+import secrets
 import io
 import json
 import math
@@ -21,7 +23,7 @@ import subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import applog, autoaccept, client_api, core, export_import, lcu_api, opponent_insight, process, queue_joiner, rank_watch, riot_api, secure_settings, settings, ui_assets, valorant_api, vault, paths
+from . import applog, autoaccept, client_api, core, export_import, lcu_api, process, queue_joiner, queue_repair, rank_watch, riot_api, secure_settings, settings, ui_assets, valorant_api, vault, paths
 
 _swap_lock = threading.Lock()
 _swap_busy = False
@@ -204,64 +206,6 @@ def _ensure_league_client_ready(timeout: float = 180.0) -> bool:
     return False
 
 
-# État de l'insight adversaire (overlay cooldowns), partagé entre le watcher
-# in-game (start_live_game_overlay_watcher, ci-dessous) et l'endpoint HTTP
-# /live-game/insight-target : "target_riot_id" est l'adversaire actuellement
-# épinglé côté frontend (cliqué dans la rangée de portraits), vide = suivi
-# auto de l'adversaire de lane. "target_champion" (rawChampionName) désigne le
-# MÊME adversaire et reste renseigné quand le Mode Streamer du client LoL vide
-# le riot_id : il distingue « épinglé mais anonymisé » (aucun insight possible)
-# de « rien d'épinglé » (repli sur la lane). "my_champion" est mis à jour à
-# chaque tick du watcher pour permettre un fetch immédiat depuis l'endpoint
-# HTTP sans attendre le prochain tick.
-_insight_state: dict = {"target_riot_id": "", "target_champion": "",
-                        "my_champion": "", "key": None, "payload": None}
-_insight_lock = threading.Lock()
-
-
-def _fetch_opponent_insight(enemy_riot_id: str, my_champion: str):
-    """Tâche de fond : winrate saison + winrate du matchup + pic observé de
-    l'adversaire ciblé (adversaire de lane, ou celui épingle manuellement dans
-    l'overlay), via la Riot API officielle (même famille de donnée que l'écran
-    de chargement de Porofessor/Blitz — juste recalculée pour CE matchup précis)."""
-    try:
-        active_name = vault.get_active()
-        account = next((a for a in vault.list_accounts() if a.name == active_name), None)
-        region = account.region if account else "EUW"
-        with _riot_lock:
-            insight = opponent_insight.get_insight(enemy_riot_id, region, my_champion)
-        payload = {
-            "riot_id": enemy_riot_id, "champion": my_champion, "error": None, "active": True, **insight,
-        }
-        with _insight_lock:
-            if _insight_state.get("key") != (enemy_riot_id, my_champion):
-                return  # cible changée pendant le fetch (stale) : n'écrase pas la cible actuelle
-            _insight_state["payload"] = payload
-        _broadcast_event("live_game_opponent_insight", payload)
-        print(f"[HEXGATE][insight] succes pour {enemy_riot_id} vs {my_champion} : "
-              f"solo={insight.get('solo')} matchup={insight.get('matchup')}", flush=True)
-    except riot_api.RiotApiError as e:
-        payload = {
-            "riot_id": enemy_riot_id, "champion": my_champion, "error": str(e), "active": True,
-        }
-        with _insight_lock:
-            if _insight_state.get("key") != (enemy_riot_id, my_champion):
-                return
-            _insight_state["payload"] = payload
-        _broadcast_event("live_game_opponent_insight", payload)
-        print(f"[HEXGATE][insight] RiotApiError pour {enemy_riot_id} vs {my_champion} : {e}", flush=True)
-    except Exception as e:
-        payload = {
-            "riot_id": enemy_riot_id, "champion": my_champion, "error": f"Erreur inattendue : {e}", "active": True,
-        }
-        with _insight_lock:
-            if _insight_state.get("key") != (enemy_riot_id, my_champion):
-                return
-            _insight_state["payload"] = payload
-        _broadcast_event("live_game_opponent_insight", payload)
-        print(f"[HEXGATE][insight] Erreur inattendue pour {enemy_riot_id} vs {my_champion} : {e}", flush=True)
-
-
 def _get_today_stats(name: str) -> tuple[dict, dict | None]:
     matches = vault.get_matches(name)
     if not matches:
@@ -271,7 +215,7 @@ def _get_today_stats(name: str) -> tuple[dict, dict | None]:
     local_time = time.localtime(now)
     midnight = time.mktime((local_time.tm_year, local_time.tm_mon, local_time.tm_mday, 0, 0, 0, 0, 0, 0))
     
-    today_matches = [m for m in matches if m.get("ts", 0) >= midnight]
+    today_matches = [m for m in matches if m.get("ts", 0) >= midnight and not vault.is_remake(m)]
     if not today_matches:
         return {}, None
         
@@ -374,7 +318,111 @@ def _ordered_accounts(product: str = "league_of_legends") -> list[vault.Account]
     return accounts
 
 
+# ─── Authentification du serveur local ──────────────────────────────────────
+# Jusqu'au 23/09/2026, ce serveur répondait à N'IMPORTE QUEL appelant avec
+# `Access-Control-Allow-Origin: *` : tout programme local — et selon le
+# navigateur, toute page web — pouvait exporter les sessions Riot avec un mot de
+# passe de son choix (`/export`) ou faire lancer un exécutable (`/open-url`).
+#
+# Désormais chaque requête doit porter un jeton aléatoire régénéré à chaque
+# démarrage du backend et écrit dans le dossier de données de l'utilisateur,
+# que seule l'appli lit (commande Tauri `api_token`). Une page web ne peut ni
+# lire ce fichier, ni deviner le jeton. Le CORS n'est plus ouvert qu'aux
+# origines de l'appli : c'est une seconde barrière, le jeton reste la première.
+API_TOKEN_FILE = paths.STORAGE_DIR / "api_token"
+_API_TOKEN: str | None = None  # None = jamais initialisé → tout est refusé
+_TOKEN_HEADER = "X-Hexgate-Token"
+_first_auth_logged = False
+
+# Origines de la WebView Tauri (Windows : http(s)://tauri.localhost) et du
+# serveur Vite de développement (`devUrl` de tauri.conf.json).
+_ALLOWED_ORIGINS = {
+    "http://tauri.localhost", "https://tauri.localhost", "tauri://localhost",
+    "http://localhost:1420", "http://127.0.0.1:1420",
+}
+
+# Images publiques chargées par des balises <img>, qui ne peuvent pas porter
+# d'en-tête : aucune donnée de compte, seulement des icônes génériques.
+_PUBLIC_PREFIXES = ("/assets/",)
+
+
+CLOUD_PASSWORD_KEY = "cloud_backup_password"
+_LEGACY_CLOUD_DEFAULT = "hexgate-default-cloud-sync"
+
+
+def migrate_cloud_password() -> None:
+    """Chiffre (DPAPI) un mot de passe cloud stocké en clair par les versions
+    antérieures au 23/09/2026. L'ancien mot de passe PAR DÉFAUT n'est pas
+    repris : il est public, la sauvegarde restera suspendue jusqu'à ce que
+    l'utilisateur en choisisse un."""
+    raw = settings.get(CLOUD_PASSWORD_KEY)
+    if not isinstance(raw, str) or raw.startswith("dpapi:"):
+        return
+    if raw.strip() and raw != _LEGACY_CLOUD_DEFAULT:
+        secure_settings.set_secret(CLOUD_PASSWORD_KEY, raw)
+    else:
+        settings.set(CLOUD_PASSWORD_KEY, None)
+    applog.get_logger().info("sauvegarde cloud: ancien mot de passe en clair migré")
+
+
+def init_api_token() -> str:
+    """Génère le jeton de la session et le publie pour l'appli. À n'appeler
+    qu'APRÈS l'acquisition exclusive du port : un second backend refusé ne doit
+    jamais écraser le jeton de celui qui tourne."""
+    global _API_TOKEN
+    from . import atomic_io
+    token = secrets.token_urlsafe(32)
+    paths.STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+    atomic_io.write_text(API_TOKEN_FILE, token)
+    _API_TOKEN = token
+    return token
+
+
 class Handler(BaseHTTPRequestHandler):
+    def _cors_origin(self) -> str | None:
+        origin = self.headers.get("Origin")
+        return origin if origin in _ALLOWED_ORIGINS else None
+
+    def _send_cors(self) -> None:
+        origin = self._cors_origin()
+        if origin:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+
+    def _authorized(self, path: str) -> bool:
+        """Vrai si la requête porte le jeton de la session (en-tête, ou
+        paramètre `token` pour le flux SSE qu'EventSource ne sait pas signer)."""
+        if path.startswith(_PUBLIC_PREFIXES):
+            return True
+        expected = _API_TOKEN
+        if not expected:
+            return False
+        given = self.headers.get(_TOKEN_HEADER)
+        if not given and path == "/events":
+            given = (parse_qs(urlparse(self.path).query).get("token") or [""])[0]
+        ok = bool(given) and hmac.compare_digest(given, expected)
+        global _first_auth_logged
+        if ok and not _first_auth_logged:
+            # Une seule fois par démarrage : prouve dans le journal que l'appli
+            # a obtenu le jeton et que CORS + CSP laissent passer ses requêtes.
+            _first_auth_logged = True
+            applog.get_logger().info(
+                "serveur local: premier appel authentifié de l'appli (%s, origine=%s)",
+                path, self.headers.get("Origin") or "-",
+            )
+        return ok
+
+    def _reject_unauthorized(self, path: str) -> bool:
+        """Répond 401 et retourne True si la requête n'est pas authentifiée."""
+        if self._authorized(path):
+            return False
+        applog.get_logger().warning(
+            "serveur local: requête refusée (jeton absent ou invalide) %s %s origine=%s",
+            self.command, path, self.headers.get("Origin") or "-",
+        )
+        self._json(401, {"error": "non autorisé"})
+        return True
+
     def log_message(self, *args):
         pass  # silence : évite de polluer stdout (lu par le sidecar Tauri)
 
@@ -382,7 +430,7 @@ class Handler(BaseHTTPRequestHandler):
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self._send_cors()
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -395,13 +443,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_OPTIONS(self):
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self._send_cors()
         self.send_header("Access-Control-Allow-Methods", "GET, POST")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", f"Content-Type, {_TOKEN_HEADER}")
+        # Chaque requête porte désormais un en-tête personnalisé, donc un
+        # preflight : le mettre en cache évite de doubler tous les appels.
+        self.send_header("Access-Control-Max-Age", "600")
         self.end_headers()
 
     def do_GET(self):
         path = urlparse(self.path).path
+        if self._reject_unauthorized(path):
+            return
         if path == "/accounts":
             product = (parse_qs(urlparse(self.path).query).get("product") or ["league_of_legends"])[0]
             if product not in process.PRODUCTS:
@@ -431,9 +484,23 @@ class Handler(BaseHTTPRequestHandler):
             # jeux plutôt qu'un par produit — cette route est celle que le
             # frontend appelle à chaque lancement et sur presque tout event SSE.
             _tasklist = process.cached_tasklist_lower()
+            # Le compte réellement connecté prime sur le pointeur du dernier
+            # swap : lancer League soi-même, ou changer de compte dans le
+            # client Riot, le laissait pointer ailleurs et affichait
+            # « CONNECTÉ » sur le mauvais compte. On en profite pour remettre
+            # le pointeur d'aplomb — un pointeur qui ment finit par faire
+            # travailler les autres fonctions sur la mauvaise fiche.
+            active = vault.get_active()
+            if not _swap_busy:  # pendant un swap, c'est `core.swap` qui décide
+                live = core.live_account_name()
+                if live and live != active:
+                    vault.set_active(live)
+                    applog.get_logger().info(
+                        "pointeur actif corrigé d'après le client : %s → %s", active, live)
+                    active = live
             self._json(200, {
                 "accounts": accounts_list,
-                "active": vault.get_active(),
+                "active": active,
                 "recap_total": recap_total,
                 "product": product,
                 "product_status": {
@@ -456,7 +523,8 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/settings/cloud-backup":
             self._json(200, {
                 "path": settings.get("cloud_backup_path"),
-                "password": settings.get("cloud_backup_password", "hexgate-default-cloud-sync")
+                # Jamais le mot de passe lui-même : seulement s'il est défini.
+                "password_configured": secure_settings.configured(CLOUD_PASSWORD_KEY),
             })
         elif path == "/ping/servers":
             self._json(200, {
@@ -480,24 +548,23 @@ class Handler(BaseHTTPRequestHandler):
             except lcu_api.LeagueNotRunning:
                 w = None
             self._json(200, {"wallet": w})
-        elif path == "/tools/settings/current":
-            # Réglages vivants du client, pour l'éditeur intégré. Tout est
-            # nullable : client fermé n'est pas une erreur.
-            payload: dict = {"game": None, "input": None}
-            try:
-                payload["game"] = lcu_api.get_game_settings()
-                payload["input"] = lcu_api.get_input_settings()
-            except lcu_api.LeagueNotRunning:
-                pass
-            except Exception:
-                pass
-            self._json(200, payload)
         elif path == "/tools/presets":
             self._json(200, {
                 "presets": vault.list_settings_presets(),
                 "accounts": [a.name for a in vault.list_accounts()],
+                # Compte réellement connecté, pas le pointeur du dernier swap :
+                # c'est de lui qu'on copie les réglages.
+                "active": core.live_account_name(),
                 "sync_enabled": bool(settings.get("game_settings_sync_enabled", False)),
             })
+        elif path == "/tools/queue-repair":
+            # Diagnostic seul, sans rien toucher : sert à afficher l'état de la
+            # messagerie du client Riot à côté du bouton de réparation.
+            try:
+                self._json(200, queue_repair.diagnose())
+            except Exception as e:
+                self._json(200, {"client": False, "affinity": None, "expected": None,
+                                 "state": None, "mismatch": False, "error": str(e)})
         elif path == "/tools/state":
             # État agrégé de l'onglet Outils : ce qui est disponible là, tout de
             # suite. Tout est facultatif — un client fermé renvoie des None
@@ -579,7 +646,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {
                 "auto_accept_delay": int(settings.get("auto_accept_delay", 0)),
                 "cloud_backup_path": settings.get("cloud_backup_path"),
-                "cloud_backup_password": settings.get("cloud_backup_password", "hexgate-default-cloud-sync"),
+                "cloud_backup_password_configured": secure_settings.configured(CLOUD_PASSWORD_KEY),
                 "auto_accept_invitations": bool(settings.get("auto_accept_invitations", False)),
                 "aram_sniper_champions": settings.get("aram_sniper_champions", ""),
                 "lobby_welcome_message": settings.get("lobby_welcome_message", ""),
@@ -594,10 +661,10 @@ class Handler(BaseHTTPRequestHandler):
                 "end_of_game_message_team_only": bool(settings.get("end_of_game_message_team_only", False)),
                 "relay_client_notifications": bool(settings.get("relay_client_notifications", True)),
                 "game_settings_sync_enabled": bool(settings.get("game_settings_sync_enabled", False)),
-                "opponent_insight_enabled": bool(settings.get("opponent_insight_enabled", False)),
                 "low_power_mode": bool(settings.get("low_power_mode", False)),
                 "remember_last_product": bool(settings.get("remember_last_product", False)),
                 "henrikdev_configured": secure_settings.configured(valorant_api.SECRET_KEY),
+                "riot_api_key_configured": secure_settings.configured(riot_api.SECRET_KEY),
                 "is_admin": is_admin
             })
         elif path == "/events":
@@ -630,14 +697,14 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(304)
             self.send_header("ETag", etag)
             self.send_header("Cache-Control", "no-cache")
-            self.send_header("Access-Control-Allow-Origin", "*")
+            self._send_cors()
             self.end_headers()
             return
         self.send_response(200)
         self.send_header("Content-Type", "image/png")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("ETag", etag)
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self._send_cors()
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -677,6 +744,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if self._reject_unauthorized(path):
+            return
         body = self._body()
         if path == "/swap":
             self._start_swap(body.get("name"), body.get("product") or "league_of_legends", body.get("queue_id"))
@@ -721,8 +790,20 @@ class Handler(BaseHTTPRequestHandler):
             settings.set("auto_accept_delay", int(body.get("delay", 0)))
             self._json(200, {"delay": int(settings.get("auto_accept_delay", 0))})
         elif path == "/settings/cloud-backup":
-            settings.set("cloud_backup_path", body.get("path"))
-            settings.set("cloud_backup_password", body.get("password") or "hexgate-default-cloud-sync")
+            # Plus de mot de passe par défaut : il était écrit en dur dans un
+            # dépôt public, donc la sauvegarde de TOUTES les sessions Riot était
+            # déchiffrable par quiconque récupérait le fichier du dossier cloud.
+            new_path = body.get("path") or None
+            new_password = body.get("password")
+            if isinstance(new_password, str) and new_password.strip():
+                if len(new_password.strip()) < 8:
+                    self._json(400, {"error": "Le mot de passe de sauvegarde doit faire au moins 8 caractères."})
+                    return
+                secure_settings.set_secret(CLOUD_PASSWORD_KEY, new_password)
+            if new_path and not secure_settings.configured(CLOUD_PASSWORD_KEY):
+                self._json(400, {"error": "Choisis un mot de passe pour chiffrer la sauvegarde cloud."})
+                return
+            settings.set("cloud_backup_path", new_path)
             _auto_sync_cloud()
             self._json(200, {"path": settings.get("cloud_backup_path")})
         elif path == "/streamer-mode":
@@ -732,7 +813,6 @@ class Handler(BaseHTTPRequestHandler):
             enabled = bool(body.get("enabled"))
             settings.set("low_power_mode", enabled)
             self._json(200, {"enabled": enabled})
-            # Les 3 fenêtres (main + overlays) appliquent le mode via cet event.
             self._broadcast("low_power", {"enabled": enabled})
         elif path == "/chat/me":
             success = lcu_api.set_presence(body.get("statusMessage") or "", body.get("availability") or "online")
@@ -759,10 +839,16 @@ class Handler(BaseHTTPRequestHandler):
                     pass
             self._json(200, {"ok": success})
         elif path == "/open-url":
+            # `webbrowser.open` aboutit à `os.startfile` sous Windows, qui ouvre
+            # aussi un exécutable ou un fichier local : seuls les liens web sont
+            # acceptés (OP.GG, u.gg, pages Riot…).
             import webbrowser
-            url = body.get("url")
-            if url:
-                webbrowser.open(url)
+            url = str(body.get("url") or "")
+            parsed = urlparse(url)
+            if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                self._json(400, {"error": "seuls les liens http(s) peuvent être ouverts"})
+                return
+            webbrowser.open(url)
             self._json(200, {"ok": True})
         elif path == "/matches/export":
             filename = body.get("filename") or "matches.json"
@@ -827,19 +913,6 @@ class Handler(BaseHTTPRequestHandler):
             self._set_pinned(body.get("name") or "", bool(body.get("pinned")), body.get("product") or "league_of_legends")
         elif path == "/valorant/tutorial":
             self._set_valorant_tutorial(body.get("name") or "", bool(body.get("confirmed")))
-        elif path == "/live-game/insight-target":
-            raw_riot_id = body.get("riot_id")
-            riot_id = raw_riot_id.strip() if isinstance(raw_riot_id, str) else ""
-            raw_champion = body.get("champion")
-            champion = raw_champion.strip() if isinstance(raw_champion, str) else ""
-            # Écrit uniquement la cible : le watcher (tick <=1s) est le SEUL
-            # déclencheur de fetch, il revalide déjà contre les ennemis réels
-            # de la partie en cours. Évite la race/duplication d'un fetch
-            # déclenché ici en parallèle du tick.
-            with _insight_lock:
-                _insight_state["target_riot_id"] = riot_id
-                _insight_state["target_champion"] = champion
-            self._json(200, {"ok": True})
         elif path == "/reorder":
             settings.set("account_order", [str(n) for n in (body.get("order") or [])])
             self._json(200, {"ok": True})
@@ -855,19 +928,19 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/valorant/refresh":
             self._refresh_valorant(body.get("name") or "")
         elif path == "/settings/update":
-            for key in ["auto_accept_delay", "cloud_backup_path", "cloud_backup_password",
+            for key in ["auto_accept_delay", "cloud_backup_path",
                         "auto_accept_invitations", "aram_sniper_champions", "lobby_welcome_message",
                         "streamer_mode", "riot_client_auto_close", "riot_client_autostart_mode",
                         "auto_mute_all_on_start", "macro_f5_text", "macro_f6_text",
                         "skip_end_of_game", "relay_client_notifications", "game_settings_sync_enabled",
-                        "opponent_insight_enabled", "end_of_game_message",
+                        "end_of_game_message",
                         "end_of_game_message_team_only", "remember_last_product"]:
                 if key in body:
                     if key == "auto_accept_delay":
                         settings.set(key, int(body[key]))
                     elif key in ["auto_accept_invitations", "streamer_mode", "riot_client_auto_close",
                                  "auto_mute_all_on_start", "skip_end_of_game", "relay_client_notifications",
-                                 "game_settings_sync_enabled", "opponent_insight_enabled",
+                                 "game_settings_sync_enabled",
                                  "end_of_game_message_team_only", "remember_last_product"]:
                         settings.set(key, bool(body[key]))
                     else:
@@ -881,6 +954,16 @@ class Handler(BaseHTTPRequestHandler):
                     secure_settings.set_secret(valorant_api.SECRET_KEY, raw_key)
                 except Exception:
                     self._json(500, {"error": "Impossible de protéger la clé HenrikDev localement."})
+                    return
+            if "riot_api_key" in body:
+                raw_riot_key = body.get("riot_api_key")
+                if not isinstance(raw_riot_key, str):
+                    self._json(400, {"error": "clé Riot API invalide"})
+                    return
+                try:
+                    secure_settings.set_secret(riot_api.SECRET_KEY, raw_riot_key)
+                except Exception:
+                    self._json(500, {"error": "Impossible de protéger la clé Riot API localement."})
                     return
             self._json(200, {"ok": True})
         elif path == "/friends/spectate":
@@ -989,41 +1072,6 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, {"ok": lcu_api.apply_identity(saved)})
             except Exception as e:
                 self._json(500, {"error": str(e)})
-        elif path in ("/tools/settings/save", "/tools/settings/restore"):
-            # Pendant MANUEL de la synchro automatique au swap
-            # (`_backup_active_game_settings`). Celle-ci est opt-in et
-            # volontairement muette : un échec ne doit jamais interrompre un
-            # swap. Ici c'est l'inverse — l'utilisateur a cliqué, il doit savoir
-            # si ça a marché.
-            name = body.get("name") or ""
-            if not name:
-                self._json(400, {"error": "name requis"})
-                return
-            if name not in {a.name for a in vault.list_accounts()}:
-                self._json(404, {"error": f"Compte « {name} » introuvable."})
-                return
-            try:
-                if path.endswith("/save"):
-                    game = lcu_api.get_game_settings()
-                    inputs = lcu_api.get_input_settings()
-                    if not game and not inputs:
-                        self._json(409, {"error": "Réglages illisibles : client League requis."})
-                        return
-                    vault.save_game_settings_backup(name, {"game": game, "input": inputs})
-                    self._json(200, {"ok": True})
-                else:
-                    backup = vault.get_game_settings_backup(name)
-                    if not backup:
-                        self._json(404, {"error": "Aucun réglage sauvegardé pour ce compte."})
-                        return
-                    ok = True
-                    if backup.get("game"):
-                        ok = lcu_api.set_game_settings(backup["game"]) and ok
-                    if backup.get("input"):
-                        ok = lcu_api.set_input_settings(backup["input"]) and ok
-                    self._json(200, {"ok": ok})
-            except Exception as e:
-                self._json(500, {"error": str(e)})
         elif path == "/tools/presets/save":
             # Photographie les réglages du client connecté sous un nom réutilisable.
             name = (body.get("name") or "").strip()
@@ -1084,31 +1132,25 @@ class Handler(BaseHTTPRequestHandler):
                     vault.save_game_settings_backup(compte, {"game": game, "input": inputs})
                 except Exception:
                     erreurs.append(compte)
+            # Sans la synchro au changement de compte, écrire la configuration
+            # des comptes visés ne produit RIEN au prochain swap. L'interface
+            # demande donc explicitement de l'activer au moment d'appliquer,
+            # au lieu d'afficher un avertissement que personne ne relie à
+            # l'échec constaté plus tard.
+            sync_active = bool(settings.get("game_settings_sync_enabled", False))
+            sync_vient_d_etre_active = False
+            if body.get("enable_sync") and not sync_active:
+                settings.set("game_settings_sync_enabled", True)
+                sync_active = True
+                sync_vient_d_etre_active = True
             self._json(200, {
                 "ok": not erreurs,
                 "accounts": len(cibles),
                 "live": applique_live,
-                "sync_enabled": bool(settings.get("game_settings_sync_enabled", False)),
+                "sync_enabled": sync_active,
+                "sync_turned_on": sync_vient_d_etre_active,
                 "errors": erreurs,
             })
-        elif path == "/tools/settings/edit":
-            # Écriture directe de réglages modifiés dans l'app. `set_*` fait un
-            # PATCH : n'envoyer que les sections touchées suffit et limite la
-            # casse en cas d'erreur de saisie.
-            game = body.get("game") if isinstance(body.get("game"), dict) else None
-            inputs = body.get("input") if isinstance(body.get("input"), dict) else None
-            if not game and not inputs:
-                self._json(400, {"error": "aucune modification fournie"})
-                return
-            try:
-                ok = True
-                if game:
-                    ok = lcu_api.set_game_settings(game) and ok
-                if inputs:
-                    ok = lcu_api.set_input_settings(inputs) and ok
-                self._json(200, {"ok": ok})
-            except Exception as e:
-                self._json(500, {"error": str(e)})
         elif path == "/tools/honor":
             try:
                 honored = lcu_api.honor_random_ally()
@@ -1135,6 +1177,15 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 count = lcu_api.clear_client_notifications()
                 self._json(200, {"ok": True, "count": count})
+            except Exception as e:
+                self._json(500, {"error": str(e)})
+        elif path == "/tools/queue-repair":
+            # Bêta : rétablit la messagerie du client Riot sans redémarrage.
+            # Jamais automatique — déclenché uniquement par le bouton dédié.
+            try:
+                self._json(200, queue_repair.repair())
+            except client_api.ClientNotRunning:
+                self._json(409, {"error": "Le client Riot doit être ouvert."})
             except Exception as e:
                 self._json(500, {"error": str(e)})
         elif path == "/champ-select-prefs":
@@ -1648,7 +1699,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self._send_cors()
         self.end_headers()
         q: queue.Queue = queue.Queue()
         _toast_subscribers.append(q)
@@ -2190,10 +2241,18 @@ def start_lcu_automation_watcher():
                 if not _riot_closed_this_game:
                     _riot_closed_this_game = True
                     if settings.get("riot_client_auto_close", False):
+                        # Seulement la FENÊTRE du client Riot, jamais son service.
+                        # `RiotClientServices.exe` est le processus qui lance League
+                        # (c'est le parent de LeagueClient.exe) et qui tient sa
+                        # session : le tuer faisait écrire à League « Lost connection
+                        # to external client. Deleting current authorization. », puis
+                        # afficher « La connexion à nos services a été interrompue »
+                        # à CHAQUE fin de partie (constaté le 23/09/2026 : journal du
+                        # client Riot arrêté à 04:06:32, perte de session à 04:06:33).
                         import subprocess
                         subprocess.run(
                             ["taskkill", "/F",
-                             "/IM", "RiotClientServices.exe", "/IM", "Riot Client.exe",
+                             "/IM", "Riot Client.exe",
                              "/IM", "RiotClientUx.exe", "/IM", "RiotClientUxRender.exe"],
                             capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW,
                         )
@@ -2533,7 +2592,11 @@ def _auto_sync_cloud():
         names = [a.name for a in vault.list_accounts()]
         if not names:
             return
-        password = settings.get("cloud_backup_password", "hexgate-default-cloud-sync")
+        password = secure_settings.get_secret(CLOUD_PASSWORD_KEY)
+        if not password:
+            # Jamais de repli sur un mot de passe connu : pas de sauvegarde du tout.
+            print("[HEXGATE] Sauvegarde Cloud ignorée : aucun mot de passe défini", flush=True)
+            return
         bundle_bytes = export_import.export_accounts(names, password)
         target = path / "hexgate_cloud_backup.hexgate"
         from . import atomic_io
@@ -2554,6 +2617,9 @@ def run(port: int = 8722):
         log.warning("démarrage: port %s indisponible (%s) — second backend refusé", port, error)
         raise
     log.info("démarrage: port %s acquis", port)
+    init_api_token()
+    log.info("démarrage: jeton d'API régénéré")
+    migrate_cloud_password()
 
     def _startup_backup():
         # En thread séparé : zippe + vérifie (testzip) tous les comptes, ce qui
@@ -2576,6 +2642,13 @@ def run(port: int = 8722):
             log.warning("sauvegarde: échec de la sauvegarde de démarrage : %s", error)
 
     threading.Thread(target=_startup_backup, daemon=True).start()
+
+    # Sessions enregistrées qui n'appartiennent pas au compte qui les porte
+    # (écrasement du 25/09/2026) : signalées « expirées » dès le démarrage.
+    try:
+        vault.audit_sessions()
+    except Exception as error:  # ne doit jamais empêcher le démarrage
+        log.warning("coffre: audit des sessions impossible : %s", error)
 
     # Ces quatre composants créaient auparavant des threads dès l'import du
     # module. Ils ne démarrent désormais qu'après l'acquisition exclusive du port.
@@ -2683,211 +2756,6 @@ def run(port: int = 8722):
                   f"BE={w.get('blue_essence')} RP={w.get('rp')}", flush=True)
             _broadcast_event("accounts_changed", None)
 
-    def start_live_game_overlay_watcher():
-        print("[HEXGATE] Démarrage du watcher overlay in-game...", flush=True)
-        was_active = False
-        last_cs = -1      # dernier palier de CS vu (l'API ne met à jour que par pas de 10)
-        last_cs_time = 0.0  # gameTime au moment de ce palier
-        enemies_sig = None  # signature du dernier broadcast ennemis (n'émettre que si ça change)
-        enemies_ticks = 0   # ré-émission périodique pour les clients SSE connectés en cours de partie
-        insight_debug_sig = None  # évite le spam de logs : n'imprime qu'au changement
-
-        while True:
-            # Hors partie (phase != InProgress, connue en mémoire via le bus push)
-            # ET overlay déjà inactif : inutile de marteler le port 2999 chaque
-            # seconde — il n'écoute qu'en partie. Réveil instantané au passage en
-            # InProgress, filet 15 s (cas rare : jeu vivant mais client LCU mort).
-            if not was_active and _gameflow_watcher.phase != "InProgress":
-                _gameflow_watcher.wait_phase_change(timeout=15)
-
-            try:
-                data = get_live_game_data()
-                if data:
-                    active_player = data.get("activePlayer", {})
-                    # Match par riotId d'abord (unique), summonerName en repli.
-                    # NB : championStats ne contient PAS de creepScore — ancien repli retiré.
-                    riot_id = active_player.get("riotId")
-                    summoner_name = active_player.get("summonerName")
-                    players = data.get("allPlayers", [])
-                    me = None
-                    if riot_id and riot_id != "#":
-                        me = next((p for p in players if p.get("riotId") == riot_id), None)
-                    if me is None and summoner_name:
-                        me = next((p for p in players if p.get("summonerName") == summoner_name), None)
-                    cs = (me or {}).get("scores", {}).get("creepScore", 0)
-
-                    game_time = data.get("gameData", {}).get("gameTime", 0.0)
-                    # Nouvelle partie (le temps recule ou le CS diminue) → reset du palier.
-                    if game_time < last_cs_time or cs < last_cs:
-                        last_cs = -1
-                    # Le CS/min est figé au moment du dernier palier : quand l'API passe
-                    # à N, le N-ième CS vient d'être pris, donc N/temps_du_palier est
-                    # exact à cet instant — au lieu de diviser un CS périmé par un
-                    # temps qui continue de courir (sous-estimation entre paliers).
-                    if cs != last_cs:
-                        last_cs = cs
-                        last_cs_time = game_time
-                    cs_per_min = last_cs / (last_cs_time / 60.0) if last_cs_time > 1.0 else 0.0
-
-                    _broadcast_event("live_game_stats", {
-                        "cs": cs,
-                        "time": game_time,
-                        "cs_per_min": cs_per_min,
-                        "active": True
-                    })
-
-                    # Équipe ennemie pour l'overlay cooldowns : broadcast seulement quand
-                    # quelque chose change (niveau, objets, mort…) pour ne pas spammer le SSE.
-                    my_team = (me or {}).get("team")
-                    enemies = []
-                    if my_team:
-                        for p in players:
-                            if p.get("team") == my_team:
-                                continue
-                            spells = p.get("summonerSpells", {}) or {}
-                            runes = p.get("runes", {}) or {}
-                            p_riot_id = p.get("riotId") or ""
-                            enemies.append({
-                                # championName = nom affiché localisé ; raw contient l'id
-                                # interne ("game_character_displayname_MissFortune") dont le
-                                # dernier segment correspond à l'id Data Dragon.
-                                "champion": p.get("championName", ""),
-                                "raw": p.get("rawChampionName", ""),
-                                # "#" ou vide si le Mode Streamer du CLIENT LoL (pas de
-                                # Hexgate) est actif chez l'observateur — anonymise alors
-                                # aussi les adversaires dans cette API locale.
-                                "riot_id": p_riot_id if p_riot_id and p_riot_id != "#" else "",
-                                "level": p.get("level", 1),
-                                "position": p.get("position", ""),
-                                "items": [i.get("itemID", 0) for i in (p.get("items") or [])],
-                                "spells": [
-                                    (spells.get("summonerSpellOne") or {}).get("rawDisplayName", ""),
-                                    (spells.get("summonerSpellTwo") or {}).get("rawDisplayName", ""),
-                                ],
-                                # Ids des 2 arbres de runes (8300 = Inspiration → Cosmic Insight
-                                # supposée pour le haste des sorts d'invocateur). Les runes
-                                # mineures exactes ne sont pas exposées par l'API.
-                                "rune_trees": [
-                                    (runes.get("primaryRuneTree") or {}).get("id", 0),
-                                    (runes.get("secondaryRuneTree") or {}).get("id", 0),
-                                ],
-                                "dead": p.get("isDead", False),
-                            })
-                    enemies_payload = {
-                        "my_position": (me or {}).get("position", ""),
-                        "enemies": enemies,
-                        "active": True,
-                    }
-                    sig = json.dumps(enemies_payload, sort_keys=True)
-                    enemies_ticks += 1
-                    # Émettre au changement, et de toute façon toutes les ~10s : un overlay
-                    # (ré)ouvert en cours de partie ne doit pas attendre le prochain level-up.
-                    periodic_rebroadcast = sig != enemies_sig or enemies_ticks >= 10
-                    if periodic_rebroadcast:
-                        enemies_sig = sig
-                        enemies_ticks = 0
-                        _broadcast_event("live_game_enemies", enemies_payload)
-
-                    # Overlay "adversaire ciblé" (opt-in, settings.opponent_insight_enabled) :
-                    # une seule requête Riot API par (adversaire, mon champion), pas à
-                    # chaque tick — déclenchée en tâche de fond dès qu'un nouveau couple
-                    # apparaît (nouvelle partie, repick avant le lock-in, ou clic sur un
-                    # autre portrait dans l'overlay — voir /live-game/insight-target).
-                    # La cible = l'adversaire épinglé côté frontend (_insight_state
-                    # ["target_riot_id"], mis à jour par cet endpoint) s'il fait toujours
-                    # partie de la partie en cours, sinon repli sur l'adversaire de lane.
-                    my_champion = (me or {}).get("championName", "")
-                    with _insight_lock:
-                        _insight_state["my_champion"] = my_champion
-                        pinned_riot_id = _insight_state.get("target_riot_id") or ""
-                        pinned_champion = _insight_state.get("target_champion") or ""
-                    lane_opponent = next(
-                        (e for e in enemies if e["position"] and e["position"] == enemies_payload["my_position"]),
-                        None,
-                    )
-                    pinned_enemy = next((e for e in enemies if e["riot_id"] == pinned_riot_id), None) if pinned_riot_id else None
-                    if pinned_enemy is None and pinned_champion:
-                        # Cible anonymisée par le Mode Streamer du client LoL : on la
-                        # retrouve par son champion. Elle devient la cible SANS repli
-                        # sur la lane — le garde-fou `target["riot_id"]` plus bas coupe
-                        # alors le fetch, au lieu d'interroger la Riot API pour un
-                        # adversaire que l'overlay n'affiche pas et dont il jettera la
-                        # réponse.
-                        pinned_enemy = next((e for e in enemies if e["raw"] == pinned_champion), None)
-                    target = pinned_enemy or lane_opponent
-                    insight_enabled = settings.get("opponent_insight_enabled", False)
-                    debug_sig = (
-                        insight_enabled,
-                        bool(target),
-                        target["riot_id"] if target else "",
-                        my_champion,
-                    )
-                    if debug_sig != insight_debug_sig:
-                        insight_debug_sig = debug_sig
-                        print(
-                            f"[HEXGATE][insight] enabled={insight_enabled} "
-                            f"my_position={enemies_payload['my_position']!r} "
-                            f"target={'oui' if target else 'non'} "
-                            f"target_riot_id={(target or {}).get('riot_id', '')!r} "
-                            f"my_champion={my_champion!r}",
-                            flush=True,
-                        )
-                    if (
-                        insight_enabled
-                        and target
-                        and target["riot_id"]
-                        and my_champion
-                    ):
-                        key = (target["riot_id"], my_champion)
-                        with _insight_lock:
-                            is_new_key = key != _insight_state.get("key")
-                            if is_new_key:
-                                _insight_state["key"] = key
-                                _insight_state["payload"] = None
-                            cached_payload = _insight_state.get("payload")
-                        if is_new_key:
-                            threading.Thread(
-                                target=_fetch_opponent_insight,
-                                args=(target["riot_id"], my_champion),
-                                daemon=True,
-                            ).start()
-                        elif periodic_rebroadcast and cached_payload is not None:
-                            # Rediffusion périodique : un overlay (re)connecté en cours de
-                            # partie (ex. après un redémarrage de l'app) ne doit pas rester
-                            # bloqué sans données juste parce qu'il a raté l'unique broadcast
-                            # initial — même logique que les ennemis ci-dessus.
-                            _broadcast_event("live_game_opponent_insight", cached_payload)
-                    was_active = True
-                else:
-                    last_cs = -1
-                    last_cs_time = 0.0
-                    if was_active:
-                        _broadcast_event("live_game_stats", {
-                            "cs": 0,
-                            "time": 0.0,
-                            "cs_per_min": 0.0,
-                            "active": False
-                        })
-                        _broadcast_event("live_game_enemies", {
-                            "my_position": "",
-                            "enemies": [],
-                            "active": False
-                        })
-                        enemies_sig = None
-                        with _insight_lock:
-                            _insight_state["key"] = None
-                            _insight_state["payload"] = None
-                            _insight_state["target_riot_id"] = ""
-                            _insight_state["target_champion"] = ""
-                            _insight_state["my_champion"] = ""
-                        _broadcast_event("live_game_opponent_insight", {
-                            "riot_id": "", "champion": "", "error": None, "active": False,
-                        })
-                        was_active = False
-            except Exception as e:
-                print(f"[HEXGATE] Erreur watcher overlay : {e}", flush=True)
-            time.sleep(1.0)
-
     threading.Thread(target=start_pre_fetch, daemon=True).start()
     threading.Thread(target=start_valorant_pre_fetch, daemon=True).start()
     threading.Thread(target=start_wallet_refresh, daemon=True).start()
@@ -2898,7 +2766,6 @@ def run(port: int = 8722):
     threading.Thread(target=start_friends_notification_watcher, daemon=True).start()
     threading.Thread(target=start_champ_select_watcher, daemon=True).start()
     threading.Thread(target=start_end_of_game_message_watcher, daemon=True).start()
-    threading.Thread(target=start_live_game_overlay_watcher, daemon=True).start()
 
     print(f"LOL_SWITCHER_READY port={port}", flush=True)  # signal lu par le sidecar Tauri
     server.serve_forever()

@@ -4,7 +4,7 @@ import {
   api, rankEmblemUrl, avatarUrl,
 } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
-import { rankInfo, wlLetters, TIER_NAMES, TIER_ORDER as TIER_LIST } from "@/lib/rank";
+import { estimateMmr, rankInfo, rankLabel, tierName, wlLetters, TIER_NAMES, TIER_ORDER as TIER_LIST } from "@/lib/rank";
 import { cn } from "@/lib/utils";
 import { Target, Trophy, Trash2, Flame, Crown, Zap } from "lucide-react";
 import { ChampionIcon } from "@/components/ChampionIcon";
@@ -35,41 +35,6 @@ function getCumulativeLp(tier: string, division: string | null, lp: number): num
     return 7000 + lp;
   }
   return tVal * 400 + dVal * 100 + lp;
-}
-
-function estimateMmr(tier: string, division: string | null, winrate: number | null): string {
-  if (!tier || tier === "UNRANKED" || tier === "NONE") return "Unranked";
-  const wr = winrate != null ? winrate : 50;
-  const divisions = ["IV", "III", "II", "I"];
-  const div = division || "IV";
-  let divIndex = divisions.indexOf(div);
-
-  if (wr >= 58) {
-    divIndex += 2;
-  } else if (wr >= 53) {
-    divIndex += 1;
-  } else if (wr <= 43) {
-    divIndex -= 1;
-  }
-
-  let tierIndex = TIERS.indexOf(tier.toUpperCase());
-  if (tierIndex === -1) return tier;
-
-  if (divIndex > 3) {
-    divIndex -= 4;
-    tierIndex += 1;
-  } else if (divIndex < 0) {
-    divIndex += 4;
-    tierIndex -= 1;
-  }
-
-  tierIndex = Math.max(0, Math.min(TIERS.length - 1, tierIndex));
-  divIndex = Math.max(0, Math.min(3, divIndex));
-
-  if (tierIndex >= 7) {
-    return TIERS[tierIndex];
-  }
-  return `${TIERS[tierIndex]} ${divisions[divIndex]}`;
 }
 
 const ROLE_LABELS: Record<string, string> = {
@@ -179,7 +144,10 @@ export function DashboardView({ accounts, recapTotal, onRefresh }: Props) {
     const historyTodayDelta = dailyDeltas.find((d) => d.day === todayKey)?.delta ?? null;
 
     // Séries de victoires (matchs classés en cache, du plus ancien au plus récent)
-    const ordered = [...matches].sort((a, b) => a.ts - b.ts);
+    // Les remakes (parties annulées) ne comptent ni comme victoire ni comme défaite.
+    const ordered = [...matches]
+      .filter((m) => !(m.remake ?? (m.duration_s > 0 && m.duration_s < 210)))
+      .sort((a, b) => a.ts - b.ts);
     let bestStreak = 0, run = 0;
     for (const m of ordered) {
       run = m.win ? run + 1 : 0;
@@ -234,7 +202,22 @@ export function DashboardView({ accounts, recapTotal, onRefresh }: Props) {
 
   const info = rankInfo(active, lang);
   const queue = active.rank?.solo ?? active.rank?.flex ?? null;
-  const wr = info.winrate != null ? Math.round(info.winrate) : null;
+  // `rankInfo` renvoie une FRACTION (0.54), pas un pourcentage : arrondie telle
+  // quelle, elle affichait « 1% WR » et faussait l'estimation de MMR qui en
+  // dépend (Or IV à 54 % affiché « MMR : SILVER I », constaté le 23/09/2026).
+  const wr = info.winrate != null ? Math.round(info.winrate * 100) : null;
+  const mmrEst = estimateMmr(info.tier || "IRON", queue?.division ?? "IV", info.lp || 0, info.winrate ?? null);
+  // Division suivante : LP restants avant la promotion (Master+ : pas de division).
+  const tierIdx = TIERS.indexOf((info.tier || "").toUpperCase());
+  const divs = ["IV", "III", "II", "I"];
+  const curDivIdx = divs.indexOf(queue?.division ?? "");
+  const next = tierIdx >= 0 && tierIdx < 6 && curDivIdx >= 0 && info.lp != null
+    ? curDivIdx < 3
+      ? { tier: TIERS[tierIdx], division: divs[curDivIdx + 1] }
+      : { tier: TIERS[tierIdx + 1], division: "IV" }
+    : null;
+  // Objectif suggéré : le palier entier suivant (ex. Or IV → Platine IV).
+  const suggestedGoal = tierIdx >= 0 && tierIdx < 6 ? { tier: TIERS[tierIdx + 1], division: "IV" } : null;
   const recap = active.recap ?? recapTotal;
   const todayLp = recap?.lp_delta ?? analysis.historyTodayDelta ?? 0;
 
@@ -341,13 +324,26 @@ export function DashboardView({ accounts, recapTotal, onRefresh }: Props) {
             <img src={rankEmblemUrl(info.tier)} alt="" className="h-10 w-10" />
             <div>
               <div className="text-[12px] font-bold" style={{ color: info.color }}>{info.main}</div>
-              <div className="text-[9.5px] text-muted leading-tight">
+              <div className="text-[11px] text-muted leading-tight">
                 {info.lp != null ? `${info.lp} LP` : t("dash.unranked")}
-                {wr != null && ` · ${wr}% WR`}
+                {wr != null && ` · ${t("stat.winrate", { n: wr })}`}
               </div>
+              {next && info.lp != null && (
+                <div className="mt-1 w-40">
+                  <div className="h-1 overflow-hidden rounded-full bg-[#050b14] border border-gold-dim/30">
+                    <div className="h-full rounded-full bg-gold" style={{ width: `${Math.min(100, info.lp)}%`, transition: "width 0.6s ease" }} />
+                  </div>
+                  <div className="mt-0.5 text-[11px] text-muted leading-tight">
+                    {t("dash.nextDiv", { lp: Math.max(0, 100 - info.lp), rank: rankLabel(next.tier, next.division, lang) })}
+                  </div>
+                </div>
+              )}
               {info.tier && info.tier !== "UNRANKED" && (
-                <div className="text-[8.5px] text-[#0ac8b9] font-bold leading-tight uppercase tracking-wide select-none">
-                  MMR : {estimateMmr(info.tier, queue?.division ?? "IV", wr)}
+                <div
+                  className="text-[11px] text-[#0ac8b9] font-bold leading-tight select-none"
+                  title={t("dash.mmrHint")}
+                >
+                  {t("dash.mmrEst")} : ≈ {rankLabel(mmrEst.tier, mmrEst.division, lang)}
                 </div>
               )}
             </div>
@@ -395,7 +391,7 @@ export function DashboardView({ accounts, recapTotal, onRefresh }: Props) {
       <div className="relative shrink-0 rounded-2xl border border-gold-dim bg-[#0a1220]/80 p-4 shadow-lg">
         <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
           <div className="flex items-center gap-2">
-            <Trophy className="h-4.5 w-4.5 text-gold animate-pulse" />
+            <Trophy className="h-4.5 w-4.5 text-gold" />
             <h3 className="text-[12px] font-bold text-gold-bright tracking-wider uppercase">
               {t("goal.progress")}
             </h3>
@@ -431,8 +427,8 @@ export function DashboardView({ accounts, recapTotal, onRefresh }: Props) {
                 <img
                   key={m.pos}
                   src={rankEmblemUrl(m.tier)}
-                  alt={m.tier}
-                  title={m.tier}
+                  alt={tierName(m.tier, lang)}
+                  title={tierName(m.tier, lang)}
                   className={cn(
                     "absolute top-0 h-5 w-5 -translate-x-1/2 transition-all duration-500",
                     m.passed
@@ -510,8 +506,23 @@ export function DashboardView({ accounts, recapTotal, onRefresh }: Props) {
           </>
         ) : (
           <div className="flex items-center justify-between gap-2 mt-1">
-            <span className="flex items-center gap-1.5 text-[10.5px] text-muted italic">
+            <span className="flex items-center gap-1.5 text-[11px] text-muted italic">
               <Target className="h-3.5 w-3.5 text-gold-dim" /> {t("goal.none")}
+              {suggestedGoal && !editingGoal && (
+                <button
+                  onClick={async () => {
+                    try {
+                      await api.setGoal(active.name, suggestedGoal.tier, suggestedGoal.division);
+                      onRefresh();
+                    } catch (e) {
+                      console.error(e);
+                    }
+                  }}
+                  className="not-italic rounded-full border border-hextech-blue/40 px-2 py-0.5 text-[11px] font-semibold text-hextech-blue transition-colors hover:bg-hextech-blue/10"
+                >
+                  {t("goal.suggest", { rank: rankLabel(suggestedGoal.tier, suggestedGoal.division, lang) })}
+                </button>
+              )}
             </span>
             {editingGoal ? (
               <div className="flex items-center gap-1 bg-[#0d1624] border border-gold-dim/40 rounded px-1.5 py-1">
@@ -573,7 +584,7 @@ export function DashboardView({ accounts, recapTotal, onRefresh }: Props) {
           {peak && peak.tier ? (
             <span className="flex items-center gap-1 text-[11px] font-extrabold text-gold-bright">
               <img src={rankEmblemUrl(peak.tier)} alt="" className="h-4 w-4" />
-              {peak.tier} {peak.division || ""}
+              {rankLabel(peak.tier, peak.division, lang)}
             </span>
           ) : (
             <span className="text-[13px] font-extrabold text-gold-bright">--</span>

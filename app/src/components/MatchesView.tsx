@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import { type Account, type Match, type ChampionStats, api, subscribeEvents } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
+import { wlLetters } from "@/lib/rank";
 import { cn } from "@/lib/utils";
 import { RotateCw, Swords, Clock, AlertCircle } from "lucide-react";
 import { toast } from "sonner";
@@ -45,7 +46,8 @@ function getPerkIconUrl(id: number): string {
 }
 
 export function MatchesView({ accounts, activeAccount }: Props) {
-  const { t } = useI18n();
+  const { t, lang } = useI18n();
+  const wl = wlLetters(lang);
   const ddVersion = useDdragonVersion();
   const [selectedAcc, setSelectedAcc] = useState<string>("");
   const [activeSubTab, setActiveSubTab] = useState<"history" | "stats" | "live">("history");
@@ -238,7 +240,7 @@ export function MatchesView({ accounts, activeAccount }: Props) {
           ))}
         </select>
 
-        <div className="flex bg-[#050b14]/80 p-0.5 border border-border rounded-lg text-[10px] font-bold uppercase tracking-wider">
+        <div className="flex bg-[#050b14]/80 p-0.5 border border-border rounded-lg text-[11px] font-bold uppercase tracking-wider">
           <button
             onClick={() => setActiveSubTab("history")}
             className={cn("px-2.5 py-1 rounded-md transition-all", activeSubTab === "history" ? "bg-gold text-black" : "text-muted hover:text-text")}
@@ -274,14 +276,14 @@ export function MatchesView({ accounts, activeAccount }: Props) {
           <div className="flex flex-col gap-2.5 pb-4">
             {/* Action Bar */}
             <div className="flex items-center justify-between border-b border-border/25 pb-2">
-              <span className="text-[10px] text-muted">
+              <span className="text-[11px] text-muted">
                 {t("matches.cached", { n: matches.length })}
               </span>
               <div className="flex items-center gap-1.5">
                 {matches.length > 0 && (
                   <button
                     onClick={handleExportJSON}
-                    className="flex items-center gap-1 text-[9px] font-bold uppercase tracking-wider border border-border bg-[#0e1624]/60 text-muted hover:text-text px-2.5 py-1 rounded-full transition-all cursor-pointer"
+                    className="flex items-center gap-1 text-[11px] font-bold uppercase tracking-wider border border-border bg-[#0e1624]/60 text-muted hover:text-text px-2.5 py-1 rounded-full transition-all cursor-pointer"
                   >
                     {t("mv.exportJson")}
                   </button>
@@ -289,7 +291,7 @@ export function MatchesView({ accounts, activeAccount }: Props) {
                 <button
                   disabled={refreshing || !targetAcc?.riot_id}
                   onClick={handleRefresh}
-                  className="flex items-center gap-1 text-[9px] font-bold uppercase tracking-wider border border-gold/30 hover:border-gold bg-[#0e1624] text-gold px-2.5 py-1 rounded-full transition-all disabled:opacity-50 cursor-pointer"
+                  className="flex items-center gap-1 text-[11px] font-bold uppercase tracking-wider border border-gold/30 hover:border-gold bg-[#0e1624] text-gold px-2.5 py-1 rounded-full transition-all disabled:opacity-50 cursor-pointer"
                 >
                   <RotateCw className={cn("h-3 w-3", refreshing && "animate-spin")} />
                   {t("matches.refresh")}
@@ -301,7 +303,7 @@ export function MatchesView({ accounts, activeAccount }: Props) {
               <div className="flex flex-col items-center justify-center pt-16 text-center text-muted gap-2">
                 <AlertCircle className="h-8 w-8 text-muted/60" />
                 <p className="text-xs font-semibold">{t("matches.empty")}</p>
-                <p className="text-[10px] text-muted max-w-xs leading-relaxed">
+                <p className="text-[11px] text-muted max-w-xs leading-relaxed">
                   {t("matches.refreshHint")}
                 </p>
               </div>
@@ -311,13 +313,16 @@ export function MatchesView({ accounts, activeAccount }: Props) {
                 const ratio = m.deaths > 0 ? ((m.kills + m.assists) / m.deaths).toFixed(2) : (m.kills + m.assists).toFixed(2);
                 const min = Math.floor(m.duration_s / 60);
                 const csMin = (m.cs / (m.duration_s / 60 || 1)).toFixed(1);
+                const remake = m.remake ?? (m.duration_s > 0 && m.duration_s < 210);
                 
                 return (
                   <div
                     key={m.match_id}
                     className={cn(
-                      "relative overflow-hidden rounded-xl border bg-card p-2.5 transition-all duration-300 grid grid-cols-[8px_50px_22px_1fr_135px] items-center gap-2",
-                      m.win 
+                      "group relative overflow-hidden rounded-xl border bg-card p-2.5 transition-all duration-300 grid grid-cols-[8px_50px_22px_1fr_135px] items-center gap-2",
+                      remake
+                        ? "border-border/40 hover:border-border shadow-[inset_3px_0_0_#7c8aa0]"
+                        : m.win 
                         ? "border-green/20 hover:border-green/45 shadow-[inset_3px_0_0_#3ddc97]" 
                         : "border-red/20 hover:border-red/45 shadow-[inset_3px_0_0_#e05c5c]"
                     )}
@@ -331,11 +336,14 @@ export function MatchesView({ accounts, activeAccount }: Props) {
                         champion={m.champion}
                         className="h-11 w-11 rounded-lg border border-gold-dim text-[13px]"
                       />
-                      <span className={cn(
-                        "absolute -bottom-1 -right-1 text-[7.5px] font-extrabold px-1 rounded border leading-none py-0.5",
-                        m.win ? "bg-[#0e2a1e] border-green/30 text-green" : "bg-[#2a0e10] border-red/30 text-red"
+                      <span
+                        title={remake ? t("matches.remakeHint") : undefined}
+                        className={cn(
+                        "absolute -bottom-1 -right-1 text-[11px] font-extrabold px-1 rounded border leading-none py-0.5",
+                        remake ? "bg-[#141c28] border-border/50 text-muted"
+                          : m.win ? "bg-[#0e2a1e] border-green/30 text-green" : "bg-[#2a0e10] border-red/30 text-red"
                       )}>
-                        {m.win ? "V" : "D"}
+                        {remake ? "—" : m.win ? wl.w : wl.l}
                       </span>
                     </div>
 
@@ -369,9 +377,15 @@ export function MatchesView({ accounts, activeAccount }: Props) {
                     <div className="min-w-0 flex flex-col justify-center gap-0.5">
                       <div className="flex items-center justify-between pr-2">
                         <div className="flex items-center gap-1.5 min-w-0">
-                          <span className="text-[10px] font-extrabold text-gold-bright truncate">{m.champion}</span>
-                          <span className="text-[9px] text-muted shrink-0">
-                            {m.queue_id === 420 ? "SoloQ" : "FlexQ"}
+                          <span className="text-[12px] font-extrabold text-gold-bright truncate">{m.champion}</span>
+                          <span className={cn(
+                            "shrink-0 text-[11px] font-bold",
+                            remake ? "text-muted" : m.win ? "text-green" : "text-red",
+                          )}>
+                            {remake ? t("matches.remake") : m.win ? t("matches.win") : t("matches.loss")}
+                          </span>
+                          <span className="text-[11px] text-muted shrink-0">
+                            · {m.queue_id === 420 ? "SoloQ" : "FlexQ"}
                           </span>
                         </div>
                         {/* Download replay button */}
@@ -379,7 +393,9 @@ export function MatchesView({ accounts, activeAccount }: Props) {
                           onClick={() => handleDownloadReplay(m.match_id)}
                           disabled={downloadingReplays[m.match_id]}
                           className={cn(
-                            "text-[8px] font-extrabold px-1.5 py-0.5 rounded transition-colors uppercase shrink-0 select-none",
+                            "text-[11px] font-extrabold px-1.5 py-0.5 rounded transition-all uppercase shrink-0 select-none focus-visible:opacity-100",
+                            // Replay : discret tant que la ligne n'est pas survolée (sauf s'il est prêt ou en cours).
+                            replayStates[m.match_id] !== "downloaded" && !downloadingReplays[m.match_id] && "opacity-0 group-hover:opacity-100",
                             replayStates[m.match_id] === "downloaded" 
                               ? "bg-green/10 border border-green/30 text-green"
                               : downloadingReplays[m.match_id]
@@ -395,10 +411,10 @@ export function MatchesView({ accounts, activeAccount }: Props) {
                         </button>
                       </div>
                       <div className="flex items-baseline gap-1.5">
-                        <span className="text-[11px] font-bold text-text">{kda}</span>
-                        <span className="text-[9px] text-muted">({ratio} KDA)</span>
+                        <span className="text-[15px] font-extrabold leading-none text-text">{kda}</span>
+                        <span className="text-[11px] text-muted">{ratio} KDA</span>
                       </div>
-                      <div className="text-[9px] text-muted leading-none">
+                      <div className="text-[11px] text-muted leading-none">
                         {m.cs} CS ({csMin}/m) · {min} min
                       </div>
                     </div>
@@ -436,37 +452,37 @@ export function MatchesView({ accounts, activeAccount }: Props) {
               <h3 className="text-xs font-bold text-gold-bright uppercase tracking-wider">
                 {t("champStats.title")}
               </h3>
-              <p className="text-[10px] text-muted italic mt-0.5">{t("champStats.scope")}</p>
+              <p className="text-[11px] text-muted italic mt-0.5">{t("champStats.scope")}</p>
             </div>
 
             {/* Vision Analytics Panel */}
             {visionStats ? (
               <div className="bg-[#0a1220]/50 border border-gold-dim/35 rounded-xl p-3 mb-1 flex flex-col gap-2">
-                <span className="text-[9px] font-extrabold uppercase tracking-wider text-gold-dim border-b border-border/25 pb-1 select-none">
+                <span className="text-[11px] font-extrabold uppercase tracking-wider text-gold-dim border-b border-border/25 pb-1 select-none">
                   {t("mv.visionTitle")}
                 </span>
                 <div className="grid grid-cols-4 gap-2 text-center">
                   <div className="bg-[#050b14]/70 border border-border/50 rounded-lg p-1.5 flex flex-col justify-center select-none">
-                    <span className="text-[7.5px] text-muted uppercase font-bold leading-none">{t("mv.visionScore")}</span>
+                    <span className="text-[11px] text-muted uppercase font-bold leading-none">{t("mv.visionScore")}</span>
                     <span className="text-[11px] font-bold text-gold-bright mt-0.5">{visionStats.avgScore}</span>
                   </div>
                   <div className="bg-[#050b14]/70 border border-border/50 rounded-lg p-1.5 flex flex-col justify-center select-none">
-                    <span className="text-[7.5px] text-muted uppercase font-bold leading-none">{t("mv.wardsPlaced")}</span>
+                    <span className="text-[11px] text-muted uppercase font-bold leading-none">{t("mv.wardsPlaced")}</span>
                     <span className="text-[11px] font-bold text-gold-bright mt-0.5">{visionStats.avgPlaced}</span>
                   </div>
                   <div className="bg-[#050b14]/70 border border-border/50 rounded-lg p-1.5 flex flex-col justify-center select-none">
-                    <span className="text-[7.5px] text-muted uppercase font-bold leading-none">{t("mv.wardsKilled")}</span>
+                    <span className="text-[11px] text-muted uppercase font-bold leading-none">{t("mv.wardsKilled")}</span>
                     <span className="text-[11px] font-bold text-gold-bright mt-0.5">{visionStats.avgKilled}</span>
                   </div>
                   <div className="bg-[#050b14]/70 border border-border/50 rounded-lg p-1.5 flex flex-col justify-center select-none">
-                    <span className="text-[7.5px] text-muted uppercase font-bold leading-none">{t("mv.pinks")}</span>
+                    <span className="text-[11px] text-muted uppercase font-bold leading-none">{t("mv.pinks")}</span>
                     <span className="text-[11px] font-bold text-gold-bright mt-0.5">{visionStats.avgPink}</span>
                   </div>
                 </div>
               </div>
             ) : matches.length > 0 ? (
               <div className="bg-[#0a1220]/20 border border-dashed border-border/30 rounded-xl p-3 mb-1 text-center select-none">
-                <span className="text-[9px] text-muted block leading-normal">
+                <span className="text-[11px] text-muted block leading-normal">
                   {t("mv.visionEmpty")}
                 </span>
               </div>
@@ -492,7 +508,7 @@ export function MatchesView({ accounts, activeAccount }: Props) {
                       <div className="min-w-0 flex flex-col gap-1">
                         <div className="flex items-center justify-between text-[11px] font-bold">
                           <span className="text-text">{s.champion}</span>
-                          <span className="text-gold">{wrPct}% WR</span>
+                          <span className="text-gold">{t("stat.winrate", { n: wrPct })}</span>
                         </div>
                         {/* Progress bar */}
                         <div className="h-1.5 w-full bg-[#101c2a] rounded-full overflow-hidden border border-border/20">
@@ -508,21 +524,21 @@ export function MatchesView({ accounts, activeAccount }: Props) {
 
                       {/* Games & KDA */}
                       <div className="text-right flex flex-col justify-center gap-0.5 shrink-0">
-                        <div className="text-[10px] font-extrabold text-gold-bright">
-                          {t("champStats.games", { n: s.games })}
+                        <div className="text-[11px] font-extrabold text-gold-bright">
+                          {t(s.games === 1 ? "champStats.game" : "champStats.games", { n: s.games })}
                         </div>
                         {(() => {
                           const lpContrib = (s.wins - (s.games - s.wins)) * 20;
                           return (
                             <div className={cn(
-                              "text-[8.5px] font-bold px-1.5 py-0.5 rounded leading-none mt-0.5 select-none text-center inline-block ml-auto",
+                              "text-[11px] font-bold px-1.5 py-0.5 rounded leading-none mt-0.5 select-none text-center inline-block ml-auto",
                               lpContrib >= 0 ? "bg-green/10 text-green border border-green/20" : "bg-red/10 text-red border border-red/20"
                             )}>
                               {lpContrib >= 0 ? "+" : ""}{lpContrib} LP
                             </div>
                           );
                         })()}
-                        <div className="text-[9px] text-muted leading-none mt-1">
+                        <div className="text-[11px] text-muted leading-none mt-1">
                           {s.kda_avg.toFixed(2)} KDA
                         </div>
                       </div>
@@ -537,10 +553,10 @@ export function MatchesView({ accounts, activeAccount }: Props) {
           <div className="flex flex-col gap-3 pb-4">
             <div className="border-b border-border/25 pb-2 flex items-center justify-between">
               <h3 className="text-xs font-bold text-gold-bright uppercase tracking-wider">
-                Live Game Tracker
+                {t("matches.liveTitle")}
               </h3>
               <span className={cn(
-                "text-[9px] font-bold px-2 py-0.5 rounded border",
+                "text-[11px] font-bold px-2 py-0.5 rounded border",
                 liveData ? "bg-[#2a0e10] border-red/40 text-red animate-pulse" : "bg-[#0e1624] border-border/30 text-muted"
               )}>
                 {liveData ? "EN JEU" : "INACTIF"}
@@ -563,7 +579,7 @@ export function MatchesView({ accounts, activeAccount }: Props) {
                   />
                   <div>
                     <h4 className="font-extrabold text-xs text-text">{liveData.activePlayer.summonerName || "Joueur"}</h4>
-                    <span className="text-[10px] text-muted flex items-center gap-1">
+                    <span className="text-[11px] text-muted flex items-center gap-1">
                       <Clock className="h-3 w-3" />
                       Durée : {Math.floor(liveData.gameData.gameTime / 60)} min
                     </span>
@@ -573,19 +589,19 @@ export function MatchesView({ accounts, activeAccount }: Props) {
                 {/* Stats recap row */}
                 <div className="grid grid-cols-3 gap-2 text-center border-t border-b border-border/30 py-2.5">
                   <div>
-                    <span className="block text-[9px] text-muted uppercase tracking-wider">KDA</span>
+                    <span className="block text-[11px] text-muted uppercase tracking-wider">KDA</span>
                     <span className="text-xs font-bold text-gold-bright">
                       {liveData.activePlayer.championStats.kills || 0} / {liveData.activePlayer.championStats.deaths || 0} / {liveData.activePlayer.championStats.assists || 0}
                     </span>
                   </div>
                   <div>
-                    <span className="block text-[9px] text-muted uppercase tracking-wider">CS</span>
+                    <span className="block text-[11px] text-muted uppercase tracking-wider">CS</span>
                     <span className="text-xs font-bold text-gold-bright">
                       {liveData.activePlayer.championStats.creepScore || 0}
                     </span>
                   </div>
                   <div>
-                    <span className="block text-[9px] text-muted uppercase tracking-wider">Gold</span>
+                    <span className="block text-[11px] text-muted uppercase tracking-wider">Gold</span>
                     <span className="text-xs font-bold text-gold-bright">
                       {Math.round(liveData.activePlayer.championStats.currentGold || 0)}
                     </span>
@@ -596,7 +612,7 @@ export function MatchesView({ accounts, activeAccount }: Props) {
               <div className="flex flex-col items-center justify-center pt-16 text-center text-muted gap-2.5 p-4 border border-dashed border-border/40 rounded-2xl">
                 <Swords className="h-9 w-9 text-muted/50" />
                 <p className="text-xs font-bold text-text">{t("mv.noLiveGame")}</p>
-                <p className="text-[10px] leading-relaxed max-w-xs">
+                <p className="text-[11px] leading-relaxed max-w-xs">
                   {t("mv.noLiveGameHint")}
                 </p>
               </div>

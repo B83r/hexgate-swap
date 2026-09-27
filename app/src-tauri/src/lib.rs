@@ -27,6 +27,21 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 struct SidecarState(Mutex<Option<Child>>);
 
+/// Jeton d'authentification du backend local, que le front joint à chaque
+/// requête. Le backend le régénère à chaque démarrage et l'écrit dans le
+/// dossier de données de l'utilisateur : une page web ne peut pas le lire,
+/// contrairement à un appel HTTP vers 127.0.0.1 (audit du 23/09/2026).
+/// Lu à chaque appel — le front le redemande s'il reçoit un 401 après un
+/// redémarrage du backend.
+#[tauri::command]
+fn api_token() -> Result<String, String> {
+    let base = std::env::var("LOCALAPPDATA").map_err(|e| e.to_string())?;
+    let path = std::path::Path::new(&base).join("LoLSwitcher").join("api_token");
+    std::fs::read_to_string(&path)
+        .map(|t| t.trim().to_string())
+        .map_err(|e| format!("jeton du backend indisponible : {e}"))
+}
+
 #[cfg(debug_assertions)]
 fn spawn_sidecar(_app: &tauri::AppHandle) -> Option<Child> {
     let mut cmd = Command::new("python");
@@ -82,6 +97,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--minimized"])))
         .manage(SidecarState(Mutex::new(None)))
+        .invoke_handler(tauri::generate_handler![api_token])
         .setup(|app| {
             if let Some(state) = app.try_state::<SidecarState>() {
                 *state.0.lock().unwrap() = spawn_sidecar(app.handle());
