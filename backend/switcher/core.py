@@ -18,6 +18,45 @@ from . import client_api, lcu_api, process, vault
 
 StatusCb = Callable[[str], None]
 
+# Identité live mise en cache : `/accounts` est rappelée à presque chaque
+# événement SSE, on ne veut pas deux requêtes au client Riot à chaque fois.
+_live_cache: tuple[float, str | None] | None = None
+_LIVE_TTL = 5.0
+
+
+def live_account_name(max_age: float = _LIVE_TTL) -> str | None:
+    """Nom, dans le coffre, du compte RÉELLEMENT connecté au client Riot.
+
+    `vault.get_active()` n'est qu'un pointeur écrit par le dernier swap : il
+    ment dès que l'utilisateur lance League lui-même ou change de compte dans
+    le client Riot. Il affichait alors « CONNECTÉ » sur le mauvais compte et
+    proposait de copier les réglages du mauvais compte (constaté le
+    20/09/2026 : League sur HideIntheShnek, Hexgate sur FREEPALESTINE).
+
+    Le puuid fait foi — il survit aux renommages Riot ; le riot id ne sert que
+    pour les fiches qui n'ont pas encore vu de puuid. Retourne None si le
+    client est fermé ou si l'identité connectée n'est enregistrée nulle part :
+    mieux vaut « aucun compte » qu'un compte faux.
+    """
+    global _live_cache
+    now = time.monotonic()
+    if _live_cache is not None and now - _live_cache[0] < max_age:
+        return _live_cache[1]
+    try:
+        identity = client_api.current_identity()
+    except client_api.ClientNotRunning:
+        identity = None
+    name = None
+    if identity:
+        accounts = vault.list_accounts()
+        puuid, riot_id = identity.get("puuid"), identity.get("riot_id")
+        if puuid:
+            name = next((a.name for a in accounts if vault.account_puuid(a.name) == puuid), None)
+        if name is None and riot_id:
+            name = next((a.name for a in accounts if a.riot_id == riot_id), None)
+    _live_cache = (now, name)
+    return name
+
 
 class SessionExpired(Exception):
     """La session sauvegardée a été rejetée par Riot (probablement invalidée
@@ -28,6 +67,12 @@ def swap(name: str, product: str = "league_of_legends",
          on_status: StatusCb = lambda _: None) -> None:
     if product not in process.PRODUCTS:
         raise ValueError("produit Riot inconnu")
+    # La session enregistrée doit être celle du compte demandé : sinon le client
+    # se reconnecterait sur un autre compte (session écrasée par erreur). On
+    # s'arrête AVANT de fermer le client — rien n'est perdu, rien n'est relancé.
+    problem = vault.check_stored_session(name)
+    if problem:
+        raise SessionExpired(problem)
     # Relevé AVANT l'arrêt du client : une fois Riot tué, plus aucune API locale
     # ne peut dire à qui appartient la session live qu'on s'apprête à re-sauvegarder.
     try:
@@ -119,6 +164,7 @@ def _wait_and_launch_product(name: str, product: str, on_status: StatusCb,
                 # login : on retente à chaque tour jusqu'à acceptation.
                 if client_api.launch_product(product):
                     on_status(f"Connecté sur « {name} », le jeu se lance.")
+                    _ensure_product_started(product, on_status)
                     return
                 time.sleep(0.5)
                 continue
@@ -144,6 +190,32 @@ def _wait_and_launch_product(name: str, product: str, on_status: StatusCb,
             login_since = None
         time.sleep(0.5)
     raise TimeoutError("Le client n'a pas fini de démarrer dans le temps imparti.")
+
+
+def _ensure_product_started(product: str, on_status: StatusCb,
+                            attempts: int = 3, wait: float = 20.0) -> None:
+    """S'assure que le jeu démarre réellement après la demande de lancement.
+
+    Le launcher répond « accepté » même quand rien ne suit (client encore en
+    train de finir son login, produit resté en attente) : le client s'ouvrait
+    alors seul, sans le jeu. On surveille l'apparition du processus du produit
+    et on redemande le lancement s'il tarde. Jamais bloquant au-delà de
+    `attempts * wait` secondes ; n'échoue pas si le jeu finit par ne pas venir
+    (le client reste utilisable, l'utilisateur voit le message).
+    """
+    for attempt in range(attempts):
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            if process.product_activity(product) != "none":
+                return
+            time.sleep(1.0)
+        if attempt < attempts - 1:
+            on_status("Le jeu tarde à démarrer — nouvelle demande de lancement…")
+            try:
+                client_api.launch_product(product)
+            except client_api.ClientNotRunning:
+                pass
+    on_status("Le client est prêt mais le jeu ne s'est pas lancé : clique sur JOUER dans le client Riot.")
 
 
 def prepare_new_login(product: str = "league_of_legends",
@@ -231,10 +303,14 @@ def update_active_profile(timeout: float = 120.0) -> str | None:
                 w = lcu_api.wallet()
             except lcu_api.LeagueNotRunning:
                 w = None
+            try:
+                reg = lcu_api.region()
+            except lcu_api.LeagueNotRunning:
+                reg = None
             vault.update_profile(name, riot_id=summoner["riot_id"],
                                  level=summoner.get("level"), rank=rank,
                                  icon_id=summoner.get("icon_id"), wallet=w,
-                                 puuid=summoner.get("puuid"))
+                                 puuid=summoner.get("puuid"), region=reg)
             return summoner["riot_id"]
         time.sleep(3)
     return None

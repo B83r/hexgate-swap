@@ -54,8 +54,21 @@ def create_startup_backup(
     finally:
         temporary.unlink(missing_ok=True)
 
+    # Rétention : les `retention` plus récentes ET la plus récente de chaque jour
+    # des 30 derniers jours. Dix redémarrages rapprochés effaçaient auparavant
+    # toutes les copies saines d'un compte (25/09/2026) : une archive par jour
+    # (~130 Ko) garde un mois de recul pour presque rien.
     archives = sorted(backup_dir.glob("hexgate_accounts_*.zip"), reverse=True)
-    for obsolete in archives[max(1, retention):]:
+    keep = set(archives[:max(1, retention)])
+    seen_days: set[str] = set()
+    for archive in archives:  # de la plus récente à la plus ancienne
+        day = archive.name[len("hexgate_accounts_"):][:8]
+        if day not in seen_days and len(seen_days) < 30:
+            seen_days.add(day)
+            keep.add(archive)
+    for obsolete in archives:
+        if obsolete in keep:
+            continue
         try:
             obsolete.unlink()
         except OSError:

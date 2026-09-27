@@ -49,6 +49,13 @@ def _safe_name(name: str) -> str:
             "Nom de compte invalide : lettres, chiffres, espaces, tirets, points et "
             "# uniquement (max 40)."
         )
+    # Le point est autorisé (pseudos Riot), mais « . » et « .. » désignent le
+    # dossier courant et le dossier PARENT : `ACCOUNTS_DIR / ".."` visait le
+    # dossier de l'appli et `delete("..")` y supprimait des fichiers (audit du
+    # 23/09/2026). Un point final est aussi refusé : Windows l'efface du nom de
+    # dossier, « Foo. » et « Foo » pointeraient alors le même compte.
+    if name.endswith(".") or set(name) <= {"."}:
+        raise ValueError("Nom de compte invalide : il ne peut pas se terminer par un point.")
     return name
 
 
@@ -333,6 +340,234 @@ def ladder_lp(solo: dict | None) -> int | None:
     return _ladder_lp_solo(solo)
 
 
+_JWT_RE = re.compile(r"[A-Za-z0-9_-]{20,}\.([A-Za-z0-9_-]{20,})\.[A-Za-z0-9_-]{10,}")
+_UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def session_owner(session_bytes: bytes | str) -> str | None:
+    """puuid du compte auquel appartient un fichier de session Riot.
+
+    Lit la revendication `sub` des jetons JWT contenus dans
+    RiotGamesPrivateSettings.yaml : c'est le SEUL moyen de savoir à qui
+    appartient une session sans client Riot lancé. Le pointeur « compte actif »
+    de state.json, lui, ment dès que l'utilisateur change de compte hors
+    d'Hexgate — et, client fermé, `refresh_active` recopiait alors la session
+    de l'autre compte dans le dossier du compte actif (session de
+    HideIntheShnek écrasée par celle d'Unreal le 25/09/2026).
+
+    Retourne None si aucun jeton lisible, ou si les jetons se contredisent.
+    """
+    import base64
+    text = session_bytes if isinstance(session_bytes, str) else session_bytes.decode("latin1")
+    subs = set()
+    for m in _JWT_RE.finditer(text):
+        seg = m.group(1)
+        seg += "=" * (-len(seg) % 4)
+        try:
+            claims = json.loads(base64.urlsafe_b64decode(seg))
+        except (ValueError, UnicodeDecodeError):
+            continue
+        sub = claims.get("sub") if isinstance(claims, dict) else None
+        if isinstance(sub, str) and _UUID_RE.fullmatch(sub):
+            subs.add(sub)
+    return subs.pop() if len(subs) == 1 else None
+
+
+def stored_session_owner(name: str) -> str | None:
+    """puuid du propriétaire de la session ENREGISTRÉE pour ce compte (ou None)."""
+    blob = paths.ACCOUNTS_DIR / _safe_name(name) / "riot_client.bin"
+    if not blob.is_file():
+        return None
+    try:
+        return session_owner(dpapi.unprotect(blob.read_bytes()))
+    except (OSError, ValueError):
+        return None
+
+
+HISTORY_KEEP = 5  # versions saines conservées par compte
+_SESSION_KEYS = ("riot_client", "league_client")
+
+
+def _history_dir(account_dir: Path) -> Path:
+    return account_dir / "history"
+
+
+def _history_entries(account_dir: Path) -> list[Path]:
+    """Versions archivées du compte, de la plus récente à la plus ancienne."""
+    root = _history_dir(account_dir)
+    if not root.is_dir():
+        return []
+    return sorted((d for d in root.iterdir() if d.is_dir()), key=lambda d: d.name, reverse=True)
+
+
+def _archive_session(account_dir: Path, expected: str | None) -> None:
+    """Met de côté la session enregistrée avant qu'elle soit remplacée.
+
+    Uniquement si elle appartient bien au compte (jamais une session déjà
+    abîmée) et si elle diffère de la dernière version archivée. Les fichiers
+    restent chiffrés DPAPI tels quels. Ne lève jamais : une panne d'archivage
+    ne doit pas empêcher la sauvegarde.
+    """
+    import hashlib
+    import shutil
+    try:
+        current = account_dir / "riot_client.bin"
+        if not current.is_file():
+            return
+        plain = dpapi.unprotect(current.read_bytes())
+        owner = session_owner(plain)
+        if not owner or (expected and owner != expected):
+            return
+        entries = _history_entries(account_dir)
+        if entries:
+            last = entries[0] / "riot_client.bin"
+            if last.is_file() and hashlib.sha256(dpapi.unprotect(last.read_bytes())).digest() == \
+                    hashlib.sha256(plain).digest():
+                return
+        stamp = time.strftime("%Y%m%d_%H%M%S") + f"_{int(time.time() * 1000) % 1000:03d}"
+        target = _history_dir(account_dir) / stamp
+        target.mkdir(parents=True, exist_ok=True)
+        for key in _SESSION_KEYS:
+            src = account_dir / f"{key}.bin"
+            if src.is_file():
+                shutil.copy2(src, target / src.name)
+        for old in _history_entries(account_dir)[HISTORY_KEEP:]:
+            shutil.rmtree(old, ignore_errors=True)
+    except Exception as error:  # noqa: BLE001 — l'archivage est un filet, jamais un prérequis
+        applog.get_logger().warning("coffre: archivage de session impossible (%s)", error)
+
+
+def _recovery_candidates(name: str):
+    """(libellé, {clé: octets chiffrés}) : historique du compte, puis sauvegardes
+    de démarrage et dossier de secours, du plus récent au plus ancien."""
+    import zipfile
+    account_dir = paths.ACCOUNTS_DIR / _safe_name(name)
+    for entry in _history_entries(account_dir):
+        files = {k: (entry / f"{k}.bin").read_bytes() for k in _SESSION_KEYS
+                 if (entry / f"{k}.bin").is_file()}
+        if "riot_client" in files:
+            yield f"l'historique du compte ({entry.name})", files
+    archives: list[Path] = []
+    for folder in (paths.STORAGE_DIR / "backups", paths.STORAGE_DIR / "sessions_rescue"):
+        if folder.is_dir():
+            archives += folder.glob("hexgate_accounts_*.zip")
+    for archive in sorted(archives, key=lambda p: p.name.split("hexgate_accounts_")[-1], reverse=True):
+        try:
+            with zipfile.ZipFile(archive) as zf:
+                prefix = f"accounts/{name}/"
+                files = {k: zf.read(f"{prefix}{k}.bin") for k in _SESSION_KEYS
+                         if f"{prefix}{k}.bin" in zf.namelist()}
+        except (OSError, zipfile.BadZipFile, KeyError):
+            continue
+        if "riot_client" in files:
+            yield f"la sauvegarde {archive.name}", files
+
+
+@_serialized_write
+def recover_session(name: str) -> str | None:
+    """Rétablit la dernière session SAINE de `name` (propriétaire = son puuid).
+
+    Cherche dans l'historique du compte puis dans les sauvegardes de démarrage.
+    Retourne le libellé de la source utilisée, ou None si aucune copie saine
+    n'existe (le compte doit alors être reconnecté). Ne touche pas aux fichiers
+    de session live.
+    """
+    expected = account_puuid(name)
+    if not expected:
+        return None
+    account_dir = paths.ACCOUNTS_DIR / _safe_name(name)
+    for label, files in _recovery_candidates(name):
+        try:
+            plain = dpapi.unprotect(files["riot_client"])
+        except (OSError, ValueError):
+            continue
+        if session_owner(plain) != expected or not has_persistent_session(plain.decode("latin1")):
+            continue
+        for key, blob in files.items():
+            atomic_io.write_bytes(account_dir / f"{key}.bin", blob)
+        meta_file = _meta_path(account_dir)
+        meta = atomic_io.read_json(meta_file)
+        meta["expired"] = False
+        atomic_io.write_json(meta_file, meta, indent=2)
+        return label
+    return None
+
+
+def _display_name_for_puuid(puuid: str) -> str | None:
+    for a in list_accounts():
+        if account_puuid(a.name) == puuid:
+            return a.riot_id or a.name
+    return None
+
+
+def check_stored_session(name: str) -> str | None:
+    """Vérifie que la session enregistrée pour `name` est bien la sienne.
+
+    Retourne None si tout va bien (ou si rien ne permet de vérifier), sinon un
+    message expliquant à qui elle appartient. Le compte est alors marqué
+    « expiré » : la carte propose de le reconnecter au lieu de lancer un swap
+    voué à ouvrir le mauvais compte.
+    """
+    expected = account_puuid(name)
+    owner = stored_session_owner(name)
+    if not expected or not owner or owner == expected:
+        return None
+    # Avant de déclarer la session perdue : une copie saine existe peut-être
+    # (historique du compte ou sauvegardes de démarrage).
+    source = recover_session(name)
+    if source:
+        applog.get_logger().warning(
+            "coffre: session de %s récupérée depuis %s (l'enregistrée appartenait à un autre compte)",
+            name, source)
+        return None
+    mark_expired(name)
+    other = _display_name_for_puuid(owner)
+    return (
+        f"La session enregistrée pour « {name} » appartient en réalité à "
+        f"« {other or 'un autre compte'} » : elle a été écrasée par erreur.\n\n"
+        "Pour réparer : connecte-toi sur ce compte dans le client Riot "
+        "(« Rester connecté » coché), puis clique « Sauvegarder la session "
+        "actuelle » avec le même nom — ou utilise « Reconnecter » sur la carte."
+    )
+
+
+def audit_sessions() -> list[str]:
+    """Contrôle toutes les sessions enregistrées ; marque « expirées » celles qui
+    appartiennent à un autre compte. Retourne les noms signalés.
+
+    Lancé au démarrage : un coffre déjà abîmé (session écrasée avant la
+    correction) est signalé tout de suite au lieu d'échouer au prochain swap.
+    """
+    flagged = []
+    for a in list_accounts():
+        # Les comptes déjà « expirés » sont contrôlés aussi : une copie saine
+        # retrouvée dans l'historique ou les sauvegardes les remet en service.
+        if check_stored_session(a.name) and not a.expired:
+            flagged.append(a.name)
+            applog.get_logger().warning(
+                "coffre: la session enregistrée de %s appartient à un autre compte — marquée expirée", a.name)
+    return flagged
+
+
+def _assert_live_session_owner(name: str, owner: str | None) -> None:
+    """Refuse de ranger la session live sous `name` si elle appartient à un
+    autre compte connu, ou contredit celle déjà enregistrée pour `name`."""
+    if not owner:
+        return
+    for a in list_accounts():
+        known = account_puuid(a.name)
+        if known == owner and a.name != name:
+            raise ValueError(
+                f"La session actuellement connectée appartient à « {a.riot_id or a.name} », "
+                f"pas à « {name} ». Rien n'a été sauvegardé, pour ne pas écraser ce compte."
+            )
+        if a.name == name and known and known != owner:
+            raise ValueError(
+                f"La session actuellement connectée n'est pas celle de « {name} ». "
+                "Rien n'a été sauvegardé, pour ne pas écraser ses identifiants."
+            )
+
+
 @_serialized_write
 def capture(name: str, refresh: bool = False) -> Account:
     """Sauvegarde la session actuellement connectée sous ce nom.
@@ -349,6 +584,8 @@ def capture(name: str, refresh: bool = False) -> Account:
             "avec « Rester connecté » coché."
         )
     riot_yaml = files["riot_client"].read_text(encoding="utf-8")
+    # Garde-fou de propriété : la session live doit appartenir à `name`.
+    _assert_live_session_owner(name, session_owner(riot_yaml))
     if not has_persistent_session(riot_yaml):
         raise ValueError(
             "La session actuelle n'est pas persistante : reconnecte-toi en cochant "
@@ -357,6 +594,8 @@ def capture(name: str, refresh: bool = False) -> Account:
 
     account_dir = paths.ACCOUNTS_DIR / name
     account_dir.mkdir(parents=True, exist_ok=True)
+    # Filet : la version saine actuelle est archivée avant d'être remplacée.
+    _archive_session(account_dir, account_puuid(name))
     for key, src in files.items():
         encrypted = dpapi.protect(src.read_bytes())
         atomic_io.write_bytes(account_dir / f"{key}.bin", encrypted)
@@ -366,7 +605,17 @@ def capture(name: str, refresh: bool = False) -> Account:
     if _meta_path(account_dir).is_file():
         old = atomic_io.read_json(_meta_path(account_dir))
 
-    account = Account(name=name, region=_extract_region(riot_yaml),
+    # Les fichiers de session récents sont binaires : `_extract_region` n'y
+    # trouve plus rien et rendait « ? ». Écrire ce « ? » par-dessus une région
+    # déjà connue la faisait disparaître à chaque sauvegarde — d'où des cartes
+    # « ? · niv. 244 » et des liens OP.GG renvoyés sur EUW par défaut
+    # (constaté le 20/09/2026). La région du client fait foi, on ne l'écrase
+    # jamais avec une extraction infructueuse.
+    extracted = _extract_region(riot_yaml)
+    if extracted == "?":
+        extracted = old.get("region") or "?"
+
+    account = Account(name=name, region=extracted,
                       saved_at=time.time(),
                       last_used=old.get("last_used") if refresh else None,
                       riot_id=old.get("riot_id"),
@@ -411,12 +660,22 @@ def restore(name: str) -> None:
 
 @_serialized_write
 def delete(name: str) -> None:
+    import shutil
     account_dir = paths.ACCOUNTS_DIR / _safe_name(name)
     if not account_dir.is_dir():
         return
-    for f in account_dir.iterdir():
-        f.unlink()
-    account_dir.rmdir()
+    # Corbeille : une suppression (clic malheureux) ne détruit plus la session.
+    # Les 10 dernières suppressions sont gardées, sessions toujours chiffrées.
+    try:
+        trash = paths.STORAGE_DIR / "trash"
+        trash.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(account_dir, trash / f"{name}_{time.strftime('%Y%m%d_%H%M%S')}")
+        for old in sorted((d for d in trash.iterdir() if d.is_dir()),
+                          key=lambda d: d.stat().st_mtime, reverse=True)[10:]:
+            shutil.rmtree(old, ignore_errors=True)
+    except OSError as error:
+        applog.get_logger().warning("coffre: corbeille impossible pour %s (%s)", name, error)
+    shutil.rmtree(account_dir)
     if get_active() == name:
         set_active(None)
 
@@ -425,7 +684,8 @@ def delete(name: str) -> None:
 def update_profile(name: str, riot_id: str | None = None,
                    level: int | None = None, rank: dict | None = None,
                    icon_id: int | None = None, wallet: dict | None = None,
-                   track_lp_delta: bool = True, puuid: str | None = None) -> int | None:
+                   track_lp_delta: bool = True, puuid: str | None = None,
+                   region: str | None = None) -> int | None:
     """Met à jour les infos de profil (riot id, niveau, rank, avatar, wallet).
 
     Retourne la variation de LP SoloQ (échelle absolue) depuis le dernier rank
@@ -488,7 +748,7 @@ def update_profile(name: str, riot_id: str | None = None,
             meta["lp_delta"] = computed_delta
 
     for key, value in (("riot_id", riot_id), ("level", level), ("rank", rank),
-                       ("icon_id", icon_id), ("wallet", wallet)):
+                       ("icon_id", icon_id), ("wallet", wallet), ("region", region)):
         if value is not None:
             meta[key] = value
 
@@ -930,8 +1190,16 @@ def merge_matches(name: str, new_items: list[dict]) -> int:
     return len(sorted_matches)
 
 
+def is_remake(m: dict) -> bool:
+    """Partie annulée (remake) : ni victoire ni défaite, à sortir de toute statistique.
+    Les matchs mis en cache avant l'ajout du champ `remake` sont repérés par leur durée."""
+    if "remake" in m:
+        return bool(m["remake"])
+    return 0 < m.get("duration_s", 999) < 210
+
+
 def champion_stats(name: str) -> list[dict]:
-    matches = get_matches(name)
+    matches = [m for m in get_matches(name) if not is_remake(m)]
     if not matches:
         return []
     stats = {}
