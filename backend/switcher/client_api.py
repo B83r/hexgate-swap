@@ -5,7 +5,7 @@ import ssl
 import urllib.error
 import urllib.request
 
-from . import paths
+from . import paths, process
 
 LOCKFILE = paths.RIOT_DATA_DIR / "Riot Client" / "Config" / "lockfile"
 _CTX = ssl._create_unverified_context()  # certificat auto-signé local
@@ -22,9 +22,11 @@ def _call(method: str, path: str, body: object = None,
     (`"<jeton>"`) et non un objet — passer la chaîne Python suffit."""
     try:
         parts = LOCKFILE.read_text(encoding="utf-8").split(":")
-        port, password = parts[2], parts[3]
-    except (OSError, IndexError) as e:
+        pid, port, password = int(parts[1]), parts[2], parts[3]
+    except (OSError, IndexError, ValueError) as e:
         raise ClientNotRunning("lockfile absent ou invalide") from e
+    if not process.pid_alive(pid):
+        raise ClientNotRunning("lockfile périmé (processus absent)")
     auth = base64.b64encode(f"riot:{password}".encode()).decode()
     req = urllib.request.Request(
         f"https://127.0.0.1:{port}{path}", method=method,

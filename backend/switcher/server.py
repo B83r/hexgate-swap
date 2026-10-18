@@ -10,7 +10,6 @@ import secrets
 import io
 import json
 import math
-import os
 import queue
 import re
 import socket
@@ -378,6 +377,12 @@ def init_api_token() -> str:
     return token
 
 
+class BadRequest(ValueError):
+    """Requête HTTP invalide (JSON illisible, paramètre absent) : répond 400."""
+
+
+_MAX_BODY = 5 * 1024 * 1024  # un corps JSON légitime fait quelques Ko
+
 class Handler(BaseHTTPRequestHandler):
     def _cors_origin(self) -> str | None:
         origin = self.headers.get("Origin")
@@ -436,10 +441,77 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _body(self) -> dict:
-        length = int(self.headers.get("Content-Length", 0))
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError as e:
+            raise BadRequest("Content-Length invalide") from e
         if not length:
             return {}
-        return json.loads(self.rfile.read(length) or b"{}")
+        if length > _MAX_BODY:
+            raise BadRequest("corps de requête trop volumineux")
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            raise BadRequest("corps JSON invalide") from e
+        if not isinstance(body, dict):
+            raise BadRequest("le corps JSON doit être un objet")
+        return body
+
+    def _fail(self, error: Exception) -> None:
+        """Réponse JSON pour une exception attrapée par une route.
+
+        Client Riot/League fermé = situation normale, pas une panne : 409
+        (« conflit d'état ») avec un code stable que l'interface peut tester,
+        au lieu d'un 500 qui ressemble à un bug du serveur.
+        """
+        if isinstance(error, (lcu_api.LeagueNotRunning, client_api.ClientNotRunning)):
+            self._json(409, {"error": "Le client Riot/League n'est pas ouvert.",
+                             "code": "client_closed"})
+            return
+        applog.get_logger().warning("route %s %s: %s: %s", self.command,
+                                    urlparse(self.path).path, type(error).__name__, error)
+        self._json(500, {"error": str(error)})
+
+    def _guarded(self, handler) -> None:
+        """Garde-fou global : une exception non prévue ne coupe plus la connexion.
+
+        Avant, toute exception hors `try` d'une route (paramètre manquant, JSON
+        invalide, compte au nom illégal…) faisait avorter le thread : le client
+        HTTP voyait une connexion fermée sans réponse. Ici : 400 pour une
+        requête invalide, 404 pour une ressource absente, 409 client fermé,
+        500 JSON journalisé (avec trace) pour le reste.
+        """
+        try:
+            handler()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return  # le client a raccroché : rien à répondre
+        except BadRequest as e:
+            self._reply_error(400, str(e))
+        except ValueError as e:  # validations métier (nom de compte illégal…)
+            self._reply_error(400, str(e))
+        except FileNotFoundError as e:
+            self._reply_error(404, str(e))
+        except (lcu_api.LeagueNotRunning, client_api.ClientNotRunning) as e:
+            try:
+                self._fail(e)
+            except OSError:
+                pass
+        except Exception as e:  # noqa: BLE001 — dernier filet, volontairement large
+            applog.get_logger().error(
+                "erreur non gérée sur %s %s", self.command, urlparse(self.path).path, exc_info=True)
+            self._reply_error(500, "erreur interne du serveur local")
+
+    def _reply_error(self, status: int, message: str) -> None:
+        try:
+            self._json(status, {"error": message})
+        except OSError:
+            pass  # réponse déjà partie ou connexion perdue
+
+    def do_GET(self):
+        self._guarded(self._do_GET)
+
+    def do_POST(self):
+        self._guarded(self._do_POST)
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -451,7 +523,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Max-Age", "600")
         self.end_headers()
 
-    def do_GET(self):
+    def _do_GET(self):
         path = urlparse(self.path).path
         if self._reject_unauthorized(path):
             return
@@ -595,10 +667,16 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/matches":
             query = parse_qs(urlparse(self.path).query)
             name = (query.get("name") or [""])[0]
+            if not name:
+                self._json(400, {"error": "paramètre name requis"})
+                return
             self._json(200, vault.get_matches(name))
         elif path == "/champion-stats":
             query = parse_qs(urlparse(self.path).query)
             name = (query.get("name") or [""])[0]
+            if not name:
+                self._json(400, {"error": "paramètre name requis"})
+                return
             self._json(200, vault.champion_stats(name))
         elif path == "/live-game":
             data = get_live_game_data()
@@ -607,19 +685,19 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 self._json(200, lcu_api.get_friends())
             except Exception as e:
-                self._json(500, {"error": str(e)})
+                self._fail(e)
         elif path == "/chat/friend-requests":
             try:
                 self._json(200, lcu_api.get_friend_requests())
             except Exception as e:
-                self._json(500, {"error": str(e)})
+                self._fail(e)
         elif path == "/replays/state":
             query = parse_qs(urlparse(self.path).query)
             match_id = (query.get("matchId") or [""])[0]
             try:
                 self._json(200, {"state": lcu_api.get_replay_state(match_id)})
             except Exception as e:
-                self._json(500, {"error": str(e)})
+                self._fail(e)
         elif path == "/server-status":
             query = parse_qs(urlparse(self.path).query)
             region = (query.get("region") or ["EUW"])[0]
@@ -637,7 +715,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._json(status, {"error": body})
             except Exception as e:
-                self._json(500, {"error": str(e)})
+                self._fail(e)
         elif path == "/settings/all":
             import ctypes
             is_admin = False
@@ -744,7 +822,7 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, {"points": points, "peak": peak, "trend_7d": trend_7d,
                          "riot_last_sync": last_sync, "riot_cooldown_remaining": cooldown_remaining})
 
-    def do_POST(self):
+    def _do_POST(self):
         path = urlparse(self.path).path
         if self._reject_unauthorized(path):
             return
@@ -791,7 +869,7 @@ class Handler(BaseHTTPRequestHandler):
                 success = lcu_api.send_friend_message(friend_jid, text)
                 self._json(200, {"ok": success})
             except Exception as e:
-                self._json(500, {"error": str(e)})
+                self._fail(e)
         elif path == "/replays/download":
             match_id = body.get("matchId")
             if not match_id:
@@ -801,7 +879,7 @@ class Handler(BaseHTTPRequestHandler):
                 success = lcu_api.download_replay(match_id)
                 self._json(200, {"ok": success})
             except Exception as e:
-                self._json(500, {"error": str(e)})
+                self._fail(e)
         elif path == "/autoaccept":
             (_accepter.enabled.set if body.get("enabled") else _accepter.enabled.clear)()
             self._json(200, {"enabled": _accepter.enabled.is_set()})
@@ -904,7 +982,7 @@ class Handler(BaseHTTPRequestHandler):
                         json.dump(matches_data, f, indent=2)
                     self._json(200, {"ok": True, "path": target_path})
                 except Exception as e:
-                    self._json(500, {"error": str(e)})
+                    self._fail(e)
             else:
                 self._json(200, {"ok": False, "cancelled": True})
         elif path == "/ping/region":
@@ -944,7 +1022,7 @@ class Handler(BaseHTTPRequestHandler):
                     f.write(raw)
                 self._json(200, {"ok": True, "path": target_path})
             except Exception as e:
-                self._json(500, {"error": str(e)})
+                self._fail(e)
         elif path == "/export":
             self._export(body.get("names") or [], body.get("password") or "")
         elif path == "/import":
@@ -1019,25 +1097,25 @@ class Handler(BaseHTTPRequestHandler):
                 success = lcu_api.spectate_friend(puuid)
                 self._json(200, {"ok": success})
             except Exception as e:
-                self._json(500, {"error": str(e)})
+                self._fail(e)
         elif path == "/loot/open-chests":
             try:
                 count = lcu_api.open_hextech_chests()
                 self._json(200, {"ok": True, "count": count})
             except Exception as e:
-                self._json(500, {"error": str(e)})
+                self._fail(e)
         elif path == "/loot/disenchant-wards-icons":
             try:
                 count = lcu_api.disenchant_wards_and_icons()
                 self._json(200, {"ok": True, "count": count})
             except Exception as e:
-                self._json(500, {"error": str(e)})
+                self._fail(e)
         elif path == "/loot/disenchant-champions":
             try:
                 count = lcu_api.disenchant_champion_shards(bool(body.get("keep_unowned", True)))
                 self._json(200, {"ok": True, "count": count})
             except Exception as e:
-                self._json(500, {"error": str(e)})
+                self._fail(e)
         elif path == "/challenges/clear-identity":
             # Retire sélectivement jetons / bannière / bordure / prestige / titre
             # de l'icône de profil. Le client League ne sait que les remplacer,
@@ -1050,7 +1128,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = lcu_api.clear_identity([str(f) for f in fields])
                 self._json(200, {"ok": result["ok"], "count": result["changed"]})
             except Exception as e:
-                self._json(500, {"error": str(e)})
+                self._fail(e)
         elif path == "/product/launch":
             # Lance un produit Riot SANS toucher aux sessions.
             #
@@ -1074,7 +1152,7 @@ class Handler(BaseHTTPRequestHandler):
                     process.launch_product(product)
                 self._json(200, {"ok": True})
             except Exception as e:
-                self._json(500, {"error": str(e)})
+                self._fail(e)
         elif path == "/tools/profile-icon":
             try:
                 ok = lcu_api.set_profile_icon(int(body.get("icon_id") or 0))
@@ -1082,7 +1160,7 @@ class Handler(BaseHTTPRequestHandler):
             except (TypeError, ValueError):
                 self._json(400, {"error": "icon_id invalide"})
             except Exception as e:
-                self._json(500, {"error": str(e)})
+                self._fail(e)
         elif path == "/tools/profile-background":
             try:
                 ok = lcu_api.set_profile_background(int(body.get("skin_id") or 0))
@@ -1090,7 +1168,7 @@ class Handler(BaseHTTPRequestHandler):
             except (TypeError, ValueError):
                 self._json(400, {"error": "skin_id invalide"})
             except Exception as e:
-                self._json(500, {"error": str(e)})
+                self._fail(e)
         elif path == "/tools/identity/save":
             # Photographie l'identité du compte CONNECTÉ et la range sous le
             # compte nommé : c'est à l'appelant de s'assurer que le bon compte
@@ -1109,7 +1187,7 @@ class Handler(BaseHTTPRequestHandler):
             except FileNotFoundError as e:
                 self._json(404, {"error": str(e)})
             except Exception as e:
-                self._json(500, {"error": str(e)})
+                self._fail(e)
         elif path == "/tools/identity/restore":
             name = body.get("name") or ""
             if not name:
@@ -1122,7 +1200,7 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 self._json(200, {"ok": lcu_api.apply_identity(saved)})
             except Exception as e:
-                self._json(500, {"error": str(e)})
+                self._fail(e)
         elif path == "/tools/presets/save":
             # Photographie les réglages du client connecté sous un nom réutilisable.
             name = (body.get("name") or "").strip()
@@ -1140,12 +1218,12 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as e:
                 self._json(400, {"error": str(e)})
             except Exception as e:
-                self._json(500, {"error": str(e)})
+                self._fail(e)
         elif path == "/tools/presets/delete":
             try:
                 self._json(200, {"ok": vault.delete_settings_preset(body.get("name") or "")})
             except Exception as e:
-                self._json(500, {"error": str(e)})
+                self._fail(e)
         elif path == "/tools/presets/apply":
             # Applique un preset au client connecté et/ou l'installe comme
             # sauvegarde des comptes visés. Pour ces derniers, l'effet est
@@ -1207,12 +1285,12 @@ class Handler(BaseHTTPRequestHandler):
                 honored = lcu_api.honor_random_ally()
                 self._json(200, {"ok": honored is not None, "player": honored})
             except Exception as e:
-                self._json(500, {"error": str(e)})
+                self._fail(e)
         elif path == "/tools/reroll":
             try:
                 self._json(200, {"ok": lcu_api.reroll_champion()})
             except Exception as e:
-                self._json(500, {"error": str(e)})
+                self._fail(e)
         elif path == "/tools/swaps/respond":
             try:
                 ok = lcu_api.respond_to_swap(
@@ -1223,13 +1301,13 @@ class Handler(BaseHTTPRequestHandler):
             except (TypeError, ValueError):
                 self._json(400, {"error": "paramètres d'échange invalides"})
             except Exception as e:
-                self._json(500, {"error": str(e)})
+                self._fail(e)
         elif path == "/tools/notifications/clear":
             try:
                 count = lcu_api.clear_client_notifications()
                 self._json(200, {"ok": True, "count": count})
             except Exception as e:
-                self._json(500, {"error": str(e)})
+                self._fail(e)
         elif path == "/tools/queue-repair":
             # Bêta : rétablit la messagerie du client Riot sans redémarrage.
             # Jamais automatique — déclenché uniquement par le bouton dédié.
@@ -1238,7 +1316,7 @@ class Handler(BaseHTTPRequestHandler):
             except client_api.ClientNotRunning:
                 self._json(409, {"error": "Le client Riot doit être ouvert."})
             except Exception as e:
-                self._json(500, {"error": str(e)})
+                self._fail(e)
         elif path == "/champ-select-prefs":
             name = body.get("name") or ""
             if not name:
@@ -1261,7 +1339,7 @@ class Handler(BaseHTTPRequestHandler):
                 success = lcu_api.accept_friend_request(str(req_id))
                 self._json(200, {"ok": success})
             except Exception as e:
-                self._json(500, {"error": str(e)})
+                self._fail(e)
         elif path == "/chat/friend-requests/decline":
             req_id = body.get("id")
             if not req_id:
@@ -1271,7 +1349,7 @@ class Handler(BaseHTTPRequestHandler):
                 success = lcu_api.decline_friend_request(str(req_id))
                 self._json(200, {"ok": success})
             except Exception as e:
-                self._json(500, {"error": str(e)})
+                self._fail(e)
         elif path == "/position-prefs":
             name = body.get("name") or ""
             if not name:
@@ -1289,7 +1367,7 @@ class Handler(BaseHTTPRequestHandler):
                 success = lcu_api.dodge_lobby()
                 self._json(200, {"ok": success})
             except Exception as e:
-                self._json(500, {"error": str(e)})
+                self._fail(e)
         elif path == "/queue/start":
             self._start_queue(body.get("queue_id"))
         elif path == "/ui-focus":

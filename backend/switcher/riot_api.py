@@ -169,7 +169,12 @@ class RiotClient:
         raise RiotApiError("Riot API : trop de tentatives (rate-limit).")
 
     def _hosts(self, region: str) -> tuple[str, str]:
-        platform = _PLATFORM.get((region or "").upper(), "euw1")
+        platform = _PLATFORM.get((region or "").upper())
+        if platform is None:
+            # Retomber sur EUW en silence donnait un historique VIDE (ou celui
+            # d'un autre joueur) sans aucune erreur pour un compte NA/KR/« ? ».
+            raise RiotApiError(f"Région inconnue : {region!r}. Ouvre le compte dans le client "
+                               "pour qu'Hexgate l'enregistre.")
         regional = _REGIONAL.get(platform, "europe")
         return platform, regional
 

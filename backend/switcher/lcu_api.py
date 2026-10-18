@@ -11,12 +11,13 @@ import unicodedata
 import urllib.error
 import urllib.request
 
-from . import paths
+from . import paths, process
 
 _CTX = ssl._create_unverified_context()
 
 
 _creds_cache: tuple[int, str] | None = None
+_creds_pid: int | None = None  # PID du client League du lockfile mis en cache
 
 
 def _lockfile_creds() -> tuple[int, str]:
@@ -27,23 +28,31 @@ def _lockfile_creds() -> tuple[int, str]:
     avec les watchers. Le cache est invalidé par `_invalidate_creds()` dès qu'une
     connexion échoue (client relancé = nouveau port) : une seule erreur transitoire
     puis relecture, comportement identique à un client fermé."""
-    global _creds_cache
+    global _creds_cache, _creds_pid
     if _creds_cache is not None:
+        if _creds_pid is not None and not process.pid_alive(_creds_pid):
+            _invalidate_creds()  # le client est mort : lockfile périmé
+            raise LeagueNotRunning("lockfile LCU périmé (processus absent)")
         return _creds_cache
     install = paths.league_install_dir()
     if install is None:
         raise LeagueNotRunning("installation LoL introuvable")
     try:
         parts = (install / "lockfile").read_text(encoding="utf-8").split(":")
+        pid = int(parts[1])
+        if not process.pid_alive(pid):
+            raise LeagueNotRunning("lockfile LCU périmé (processus absent)")
         _creds_cache = (int(parts[2]), parts[3])
+        _creds_pid = pid
         return _creds_cache
     except (OSError, IndexError, ValueError) as e:
         raise LeagueNotRunning("lockfile LCU absent") from e
 
 
 def _invalidate_creds() -> None:
-    global _creds_cache
+    global _creds_cache, _creds_pid
     _creds_cache = None
+    _creds_pid = None
 
 
 class EventSocket:

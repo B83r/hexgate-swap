@@ -120,6 +120,35 @@ def start_tasklist_watcher() -> None:
     threading.Thread(target=_loop, daemon=True).start()
 
 
+def pid_alive(pid: int) -> bool:
+    """Vrai si un processus de ce PID tourne encore.
+
+    Sert à détecter un lockfile PÉRIMÉ : quand le client Riot/League est tué
+    (crash, taskkill), son lockfile reste sur le disque avec le port et le mot
+    de passe d'une session morte. Sans ce contrôle, chaque appel local tentait
+    une connexion vers un port fermé avant de conclure « client fermé ».
+    En cas de doute (accès refusé…), on répond « vivant » : la connexion
+    tranchera, comme avant.
+    """
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    STILL_ACTIVE = 259
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+        if not handle:
+            return ctypes.get_last_error() == 5  # ERROR_ACCESS_DENIED : il existe
+        try:
+            code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(ctypes.c_void_p(handle), ctypes.byref(code)):
+                return True
+            return code.value == STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(ctypes.c_void_p(handle))
+    except (OSError, ValueError, AttributeError):
+        return True
+
+
 def is_riot_running() -> bool:
     out = _tasklist_lower()
     return any(name.lower() in out for name in RIOT_PROCESSES)
