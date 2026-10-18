@@ -25,3 +25,8 @@ tmp/
 # Éditeurs / OS
 .DS_Store
 Thumbs.db
+
+# Documents internes (audit, journal de passation) : jamais publiés
+AUDIT-*.md
+CLAUDE_TRANS.md
+CLAUDE_TASK.md
