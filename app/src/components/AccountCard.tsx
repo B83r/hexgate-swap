@@ -397,7 +397,7 @@ function AccountCardImpl({
             </MagneticButton>
           ) : gameflowPhase === "ChampSelect" ? (
             <div className="flex flex-col items-center gap-1">
-              <span className="flex h-[26px] w-[92px] items-center justify-center rounded-full border border-purple bg-[#1a0e2a] text-[11px] font-bold text-purple animate-pulse">
+              <span className="flex h-[26px] min-w-[92px] shrink-0 items-center justify-center whitespace-nowrap rounded-full border border-purple bg-[#1a0e2a] px-2.5 text-[11px] font-bold leading-none text-purple animate-pulse">
                 {t("card.champSelect")}
               </span>
               {onDodge && <LeaveButton onClick={onDodge} label={t("card.leave")} />}

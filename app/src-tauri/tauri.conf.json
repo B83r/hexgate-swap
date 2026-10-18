@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run sidecar:build && npm run build",
+    "beforeBuildCommand": "npm run deceive:build && npm run sidecar:build && npm run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -56,6 +56,11 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "windows": {
+      "nsis": {
+        "installerHooks": "installer/hooks.nsh"
+      }
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -64,7 +69,8 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "resources/hexgate-backend/**/*"
+      "resources/hexgate-backend/**/*",
+      "resources/deceive/**/*"
     ]
   }
 }

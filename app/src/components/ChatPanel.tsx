@@ -290,7 +290,6 @@ export function ChatPanel({ open, onClose }: Props) {
                 >
                   <option value="online">{t("chat.online")}</option>
                   <option value="away">{t("chat.away")}</option>
-                  <option value="offline">{t("chat.invisible")}</option>
                 </select>
                 <input
                   type="text"

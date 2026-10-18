@@ -101,6 +101,17 @@ export interface Rank {
 
 export type Product = "league_of_legends" | "valorant";
 
+export type PresenceStatus = "chat" | "offline" | "mobile";
+export interface DeceiveState {
+  configured: boolean;
+  available: boolean;
+  running: boolean;
+  connected: boolean;
+  proxy_enabled: boolean;
+  status: PresenceStatus;
+  lobby_chat: boolean;
+}
+
 /** Éléments de l'identité de profil League qu'on sait retirer un par un.
  * L'API locale remplaçant l'objet entier, le backend réémet toujours les
  * éléments non listés à l'identique (cf. `lcu_api.clear_identity`). */
@@ -275,6 +286,8 @@ async function req<T>(path: string, init?: RequestInit, retried = false): Promis
 }
 
 export const api = {
+  loginCredentials: (name: string, action: "status" | "save" | "delete", username?: string, password?: string) =>
+    req<{ configured: boolean }>("/login-credentials", { method: "POST", body: JSON.stringify({ name, action, username, password }) }),
   listAccounts: (product: Product = "league_of_legends") =>
     req<{ accounts: Account[]; active: string | null; recap_total: Recap | null; product: Product; product_status: ProductStatus }>(`/accounts?product=${product}`),
   getProductStatus: () => req<ProductStatus>("/products/status"),
@@ -302,8 +315,8 @@ export const api = {
     req<{ imported: string[] }>("/import", { method: "POST", body: JSON.stringify({ data, password }) }),
   setNote: (name: string, note: string) =>
     req<{ ok: boolean }>("/note", { method: "POST", body: JSON.stringify({ name, note }) }),
-  reconnect: (name: string, queue_id?: number) =>
-    req<{ started: boolean }>("/reconnect", { method: "POST", body: JSON.stringify({ name, queue_id }) }),
+  reconnect: (name: string, queue_id?: number, product: Product = "league_of_legends") =>
+    req<{ started: boolean }>("/reconnect", { method: "POST", body: JSON.stringify({ name, queue_id, product }) }),
   getQueuePenalty: () =>
     req<{ penalty: { seconds_remaining: number; reason: string | null } | null }>("/queue-penalty"),
   getWallet: () => req<{ wallet: Wallet | null }>("/wallet"),
@@ -339,6 +352,13 @@ export const api = {
   getChampionStats: (name: string) => req<ChampionStats[]>(`/champion-stats?name=${encodeURIComponent(name)}`),
   getLiveGame: () => req<any>("/live-game"),
   getFriends: () => req<any[]>("/chat/friends"),
+  getDeceiveState: () => req<DeceiveState>("/deceive"),
+  configureDeceive: (enabled: boolean, status: PresenceStatus) =>
+    req<DeceiveState>("/deceive/config", { method: "POST", body: JSON.stringify({ enabled, status }) }),
+  updateDeceiveState: (status: PresenceStatus, enabled: boolean, lobbyChat: boolean) =>
+    req<DeceiveState>("/deceive/state", { method: "POST", body: JSON.stringify({ status, enabled, lobbyChat }) }),
+  startWithDeceive: (product: Product | "bacon") =>
+    req<{ ok: boolean }>("/deceive/start", { method: "POST", body: JSON.stringify({ product }) }),
   sendChatMessage: (friendJid: string, text: string) =>
     req<{ ok: boolean }>("/chat/message", {
       method: "POST",

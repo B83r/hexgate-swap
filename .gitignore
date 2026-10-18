@@ -11,6 +11,9 @@ app/src-tauri/target/
 backend/build/
 backend/dist/
 app/src-tauri/resources/hexgate-backend/
+app/src-tauri/resources/deceive/
+third_party/deceive/**/bin/
+third_party/deceive/**/obj/
 app/src-tauri/binaries/
 __pycache__/
 *.pyc

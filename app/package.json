@@ -6,6 +6,7 @@
   "scripts": {
     "assets:riot": "powershell -NoProfile -ExecutionPolicy Bypass -File ../tools/sync-communitydragon-assets.ps1 -Force",
     "sidecar:build": "powershell -NoProfile -ExecutionPolicy Bypass -File ../tools/build-sidecar.ps1",
+    "deceive:build": "powershell -NoProfile -ExecutionPolicy Bypass -File ../tools/build-deceive.ps1",
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",

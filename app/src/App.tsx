@@ -9,8 +9,10 @@ import { AccountCard } from "@/components/AccountCard";
 import { ValorantAccountCard } from "@/components/ValorantAccountCard";
 import { SwapOverlay } from "@/components/SwapOverlay";
 import { AutoAcceptPill } from "@/components/AutoAcceptPill";
+import { PresenceControl } from "@/components/PresenceControl";
 import { NameDialog } from "@/components/NameDialog";
 import { NoteDialog } from "@/components/NoteDialog";
+import { LoginCredentialsDialog } from "@/components/LoginCredentialsDialog";
 import { RankDetailDialog } from "@/components/RankDetailDialog";
 import { ConfirmDialog, type ConfirmRequest } from "@/components/ConfirmDialog";
 import { SettingsButton } from "@/components/SettingsButton";
@@ -113,6 +115,7 @@ export default function App() {
   const [streamerMode, setStreamerMode] = useState(false);
   const [noteFor, setNoteFor] = useState<string | null>(null);
   const [reconnecting, setReconnecting] = useState<string | null>(null);
+  const [credentialsAccount, setCredentialsAccount] = useState<string | null>(null);
   const [penaltySeconds, setPenaltySeconds] = useState<number | null>(null);
   const [wallet, setWallet] = useState<Wallet | null>(null);
   const [rankDetailFor, setRankDetailFor] = useState<string | null>(null);
@@ -621,7 +624,7 @@ export default function App() {
       if (account.valorant.status === "expired") {
         setReconnecting(account.name);
         try {
-          await api.reconnect(account.name);
+          await api.reconnect(account.name, undefined, "valorant");
           toast.info(tRef.current("app.toastReconnecting", { name: account.name }));
         } catch (e) {
           setReconnecting(null);
@@ -683,7 +686,7 @@ export default function App() {
           illisibles — pendant que « Auto-accept · OFF » gardait tout son texte.
           Le groupe de droite reste `shrink-0` pour que le bouton réglages ne
           sorte jamais du cadre. */}
-      <div className="flex items-center justify-between gap-2 px-4 pt-2.5 pb-2 border-b border-border/10 bg-[#020912]/20">
+      <div className="relative z-20 flex items-center justify-between gap-2 px-4 pt-2.5 pb-2 border-b border-border/10 bg-[#020912]/20">
         <div className="flex min-w-0 shrink overflow-x-auto bg-[#050b14]/90 p-0.5 border border-border/40 rounded-xl text-[11px] font-bold uppercase tracking-wider font-nav [scrollbar-width:none]">
           {(product === "valorant" ? [
             { id: "list", labelKey: "nav.accounts", Icon: List },
@@ -729,6 +732,7 @@ export default function App() {
               {t("nav.queueEta", { time: `${Math.floor(estimatedQueueTime / 60)}m${estimatedQueueTime % 60}s` })}
             </span>
           )}
+          <PresenceControl />
           {product === "league_of_legends" && <AutoAcceptPill enabled={autoAccept} onToggle={toggleAutoAccept} />}
           <button
             onClick={() => setChatOpen(!chatOpen)}
@@ -851,7 +855,11 @@ export default function App() {
       {/* Footer buttons row */}
       {view === "list" && (
         <div className="flex items-center justify-between px-4 py-3">
-          <div className="flex gap-2.5">
+          <div className="flex flex-wrap gap-2.5">
+            <button disabled={!selected} onClick={() => selected && setCredentialsAccount(selected)}
+              className="h-[38px] rounded-full border border-border px-4 text-[12px] text-muted transition-colors hover:text-gold disabled:opacity-40">
+              Connexion de secours
+            </button>
             <button
               onClick={addAccount}
               className="group flex h-[38px] items-center gap-2 rounded-full bg-gradient-to-b from-gold to-[#a5842f] py-0 pl-2 pr-4 text-[12px] font-bold text-[#0a0f14] shadow-[0_4px_14px_-3px_rgba(200,170,110,0.5)] transition-all hover:from-gold-bright hover:to-gold hover:shadow-[0_6px_20px_-3px_rgba(240,230,210,0.55)] active:scale-95"
@@ -890,6 +898,7 @@ export default function App() {
         </div>
       )}
 
+      {credentialsAccount && <LoginCredentialsDialog key={credentialsAccount} name={credentialsAccount} onClose={() => setCredentialsAccount(null)} />}
       <SwapOverlay
         open={swap !== null}
         account={swap?.account ?? null}
