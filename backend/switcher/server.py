@@ -23,7 +23,7 @@ import subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import applog, autoaccept, client_api, core, export_import, lcu_api, process, queue_joiner, queue_repair, rank_watch, riot_api, secure_settings, settings, ui_assets, valorant_api, vault, paths
+from . import applog, autoaccept, client_api, core, deceive, export_import, lcu_api, parent_watch, process, queue_joiner, queue_repair, rank_watch, riot_api, secure_settings, settings, ui_assets, valorant_api, vault, paths
 
 _swap_lock = threading.Lock()
 _swap_busy = False
@@ -518,6 +518,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"name": core.suggest_account_name()})
         elif path == "/autoaccept":
             self._json(200, {"enabled": _accepter.enabled.is_set()})
+        elif path == "/deceive":
+            self._json(200, deceive.state())
         elif path == "/settings/autoaccept-delay":
             self._json(200, {"delay": int(settings.get("auto_accept_delay", 0))})
         elif path == "/settings/cloud-backup":
@@ -747,7 +749,24 @@ class Handler(BaseHTTPRequestHandler):
         if self._reject_unauthorized(path):
             return
         body = self._body()
-        if path == "/swap":
+        if path == "/login-credentials":
+            from . import login_credentials
+            name = body.get("name")
+            if not isinstance(name, str) or not any(a.name == name for a in vault.list_accounts()):
+                self._json(404, {"error": "Compte introuvable."})
+                return
+            try:
+                action = body.get("action", "status")
+                if action == "save":
+                    login_credentials.save(name, body.get("username"), body.get("password"))
+                elif action == "delete":
+                    login_credentials.delete(name)
+                elif action != "status":
+                    raise ValueError("Action inconnue.")
+                self._json(200, {"configured": login_credentials.configured(name)})
+            except (ValueError, RuntimeError, OSError):
+                self._json(400, {"error": "Impossible de gérer ces identifiants. Vérifie les champs et l'identité du compte sauvegardé."})
+        elif path == "/swap":
             self._start_swap(body.get("name"), body.get("product") or "league_of_legends", body.get("queue_id"))
         elif path == "/capture":
             self._capture(body.get("name"))
@@ -814,6 +833,31 @@ class Handler(BaseHTTPRequestHandler):
             settings.set("low_power_mode", enabled)
             self._json(200, {"enabled": enabled})
             self._broadcast("low_power", {"enabled": enabled})
+        elif path == "/deceive/config":
+            try:
+                self._json(200, deceive.configure(body.get("enabled") is True,
+                                                   body.get("status") or "offline"))
+            except (ValueError, FileNotFoundError, RuntimeError) as e:
+                self._json(400, {"error": str(e)})
+        elif path == "/deceive/state":
+            try:
+                self._json(200, deceive.update(body.get("status") or "",
+                                                body.get("enabled"), body.get("lobbyChat")))
+            except (ValueError, FileNotFoundError, RuntimeError) as e:
+                self._json(409, {"error": str(e)})
+        elif path == "/deceive/start":
+            product = body.get("product") or ""
+            if product not in deceive.GAMES:
+                self._json(400, {"error": "jeu Riot inconnu"})
+                return
+            if process.is_riot_running():
+                self._json(409, {"error": "Ferme le client Riot ou change de compte dans Hexgate pour démarrer le mode de présence."})
+                return
+            try:
+                deceive.launch(product)
+                self._json(200, {"ok": True})
+            except (ValueError, FileNotFoundError, RuntimeError, OSError) as e:
+                self._json(409, {"error": str(e)})
         elif path == "/chat/me":
             success = lcu_api.set_presence(body.get("statusMessage") or "", body.get("availability") or "online")
             self._json(200, {"ok": success})
@@ -908,7 +952,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/note":
             self._set_note(body.get("name") or "", body.get("note") or "")
         elif path == "/reconnect":
-            self._reconnect(body.get("name"), body.get("queue_id"))
+            self._reconnect(body.get("name"), body.get("queue_id"), body.get("product") or "league_of_legends")
         elif path == "/pin":
             self._set_pinned(body.get("name") or "", bool(body.get("pinned")), body.get("product") or "league_of_legends")
         elif path == "/valorant/tutorial":
@@ -1020,7 +1064,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(400, {"error": "produit Riot inconnu"})
                 return
             try:
-                process.launch_product(product)
+                if deceive.enabled() and process.is_riot_client_running():
+                    if not deceive.state()["connected"]:
+                        self._json(409, {"error": "Le client Riot actuel n'a pas été lancé avec le mode de présence Hexgate. Change de compte ou relance Riot d'abord."})
+                        return
+                    if not client_api.launch_product(product):
+                        raise RuntimeError("Le Riot Client a refusé de lancer le jeu.")
+                else:
+                    process.launch_product(product)
                 self._json(200, {"ok": True})
             except Exception as e:
                 self._json(500, {"error": str(e)})
@@ -1398,9 +1449,13 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, {"ok": True})
         self._broadcast("accounts_changed", None)
 
-    def _reconnect(self, name: str | None, queue_id: int | None = None):
+    def _reconnect(self, name: str | None, queue_id: int | None = None,
+                   product: str = "league_of_legends"):
         if not name:
             self._json(400, {"error": "name requis"})
+            return
+        if product not in process.PRODUCTS:
+            self._json(400, {"error": "produit Riot inconnu"})
             return
         with _swap_lock:
             global _swap_busy
@@ -1421,12 +1476,16 @@ class Handler(BaseHTTPRequestHandler):
                         resolved_queue = account.post_swap.get("queue_id")
                     auto_join = account.post_swap.get("auto_join", True)
 
-                core.reconnect_expired(name, on_status=lambda m: _broadcast_toast(m, "info"))
-                if resolved_queue is not None and auto_join:
+                core.reconnect_expired(name, product=product, on_status=lambda m: _broadcast_toast(m, "info"))
+                core._wait_and_launch_product(name, product, lambda m: _broadcast_toast(m, "info"))
+                if product == "league_of_legends" and resolved_queue is not None and auto_join:
                     _joiner.set_pending(resolved_queue, account.position_prefs if account else None)
                 self._broadcast("reconnect_done", name)
                 _broadcast_toast(f"« {name} » reconnecté avec succès", "ok")
-                threading.Thread(target=self._refresh_profile, daemon=True).start()
+                if product == "league_of_legends":
+                    threading.Thread(target=self._refresh_profile, daemon=True).start()
+                else:
+                    self._broadcast("accounts_changed", None)
             except Exception as e:
                 self._broadcast("reconnect_error", str(e))
                 _broadcast_toast(str(e).split("\n")[0], "warn")
@@ -1681,7 +1740,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._broadcast("matches_done", {"name": name, "count": total})
                 self._broadcast("accounts_changed", None)
             except riot_api.RiotApiError as e:
-                self._broadcast("matches_error", {"name": name, "error": str(e), "code": "key_expired" if "401" in str(e) or "403" in str(e) else "api_error"})
+                self._broadcast("matches_error", {
+                    "name": name,
+                    "error": str(e),
+                    # Un 403 est souvent un refus d'endpoint, de région ou
+                    # d'identifiant. Seul le 401 confirme que Riot rejette la
+                    # clé elle-même.
+                    "code": "key_expired" if e.status_code == 401 else "api_error",
+                    "status_code": e.status_code,
+                })
             except Exception as e:
                 self._broadcast("matches_error", {"name": name, "error": f"Erreur inattendue : {e}"})
             finally:
@@ -2086,6 +2153,25 @@ def start_ping_watcher():
                 _ui_focus_changed.clear()
         except Exception:
             time.sleep(2)
+
+
+def start_session_sync_watcher():
+    from .session_sync import SessionSync
+    monitor = SessionSync()
+    while True:
+        try:
+            # Empêche une capture entre la décision de swap et sa restauration.
+            with _swap_lock:
+                if _swap_busy:
+                    monitor.reset()
+                else:
+                    updated = monitor.tick()
+                    if updated:
+                        _broadcast_event("accounts_changed", None)
+        except Exception as error:
+            # Ne jamais logger les données de session ni le corps d'une réponse.
+            applog.get_logger().warning("session-sync: échec temporaire (%s)", type(error).__name__)
+        time.sleep(5)
 
 
 def start_background_watcher():
@@ -2607,6 +2693,7 @@ def _auto_sync_cloud():
 
 
 def run(port: int = 8722):
+    parent_watch.arm()
     log = applog.get_logger()
     log.info("démarrage: tentative d'acquisition exclusive du port %s", port)
     # Réserver le port AVANT sauvegardes et workers. Ainsi, même un lancement
@@ -2760,6 +2847,7 @@ def run(port: int = 8722):
     threading.Thread(target=start_valorant_pre_fetch, daemon=True).start()
     threading.Thread(target=start_wallet_refresh, daemon=True).start()
     threading.Thread(target=start_background_watcher, daemon=True).start()
+    threading.Thread(target=start_session_sync_watcher, daemon=True).start()
     threading.Thread(target=start_ping_watcher, daemon=True).start()
     threading.Thread(target=start_lcu_automation_watcher, daemon=True).start()
     threading.Thread(target=start_hotkey_listener, daemon=True).start()

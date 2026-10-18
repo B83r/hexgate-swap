@@ -70,7 +70,8 @@ def has_persistent_session(yaml_text: str) -> bool:
     Les anciennes versions du client Riot écrivaient directement un cookie
     ``ssid``. Les versions récentes séparent ``riot-login`` de
     l'authentificateur RSO ``rso-authenticator``. Le champ ``persist`` de
-    ``riot-login`` est désormais nul même pour une session durable. Le signal
+    ``riot-login`` peut être nul ou absent (remplacé par ``psl``) même pour
+    une session durable. Le signal
     fiable est l'entrée RSO complète : elle porte une ``value`` non vide avec
     l'attribut de cookie ``persistent: true`` **et** un ``refresh_token``.
     Le cookie persistant seul ne représente qu'un appareil connu ; il ne suffit
@@ -87,9 +88,8 @@ def has_persistent_session(yaml_text: str) -> bool:
         return True
 
     lines = yaml_text.splitlines()
-    if _yaml_block_after_key(lines, "riot-login") is None:
-        return False
-    # Dans le format Riot actuel, ces deux blocs sont frères et non imbriqués.
+    # Le bloc d'authentification et le jeton durable font foi. Exiger encore
+    # riot-login rejetait les sessions NA récentes stockées sous psl.
     rso_authenticator = _yaml_block_after_key(lines, "rso-authenticator")
     return (
         rso_authenticator is not None
@@ -569,7 +569,8 @@ def _assert_live_session_owner(name: str, owner: str | None) -> None:
 
 
 @_serialized_write
-def capture(name: str, refresh: bool = False) -> Account:
+def capture(name: str, refresh: bool = False, expected_owner: str | None = None,
+            session_snapshot: bytes | None = None) -> Account:
     """Sauvegarde la session actuellement connectée sous ce nom.
 
     refresh=True : re-sauvegarde silencieuse d'un compte existant (les jetons Riot
@@ -583,9 +584,13 @@ def capture(name: str, refresh: bool = False) -> Account:
             "Aucune session trouvée : connecte-toi d'abord dans le client Riot "
             "avec « Rester connecté » coché."
         )
-    riot_yaml = files["riot_client"].read_text(encoding="utf-8")
+    riot_bytes = session_snapshot if session_snapshot is not None else files["riot_client"].read_bytes()
+    riot_yaml = riot_bytes.decode("utf-8")
+    owner = session_owner(riot_yaml)
+    if expected_owner and owner != expected_owner:
+        raise ValueError("Le fichier de session Riot ne correspond pas au compte connecté. Rien n'a été sauvegardé.")
     # Garde-fou de propriété : la session live doit appartenir à `name`.
-    _assert_live_session_owner(name, session_owner(riot_yaml))
+    _assert_live_session_owner(name, owner)
     if not has_persistent_session(riot_yaml):
         raise ValueError(
             "La session actuelle n'est pas persistante : reconnecte-toi en cochant "
@@ -597,7 +602,11 @@ def capture(name: str, refresh: bool = False) -> Account:
     # Filet : la version saine actuelle est archivée avant d'être remplacée.
     _archive_session(account_dir, account_puuid(name))
     for key, src in files.items():
-        encrypted = dpapi.protect(src.read_bytes())
+        if session_snapshot is not None and key != "riot_client":
+            continue  # synchronisation live : seul le fichier Riot a été validé
+        # Chiffrer exactement les octets vérifiés, même si Riot réécrit ensuite
+        # son fichier : aucune seconde lecture non contrôlée de la session.
+        encrypted = dpapi.protect(riot_bytes if key == "riot_client" else src.read_bytes())
         atomic_io.write_bytes(account_dir / f"{key}.bin", encrypted)
 
     # préserve les infos de profil (rank, riot id…) déjà connues pour ce compte
@@ -637,6 +646,36 @@ def capture(name: str, refresh: bool = False) -> Account:
 
 
 @_serialized_write
+def sync_authenticated_session(identity: dict, snapshot: bytes) -> str | None:
+    """Actualise uniquement le compte connu propriétaire d'une session live validée.
+
+    Aucune écriture dans les fichiers Riot ; ne crée jamais de nouvelle fiche.
+    Le verrou du coffre couvre sélection et capture, y compris face à une suppression.
+    """
+    owner = identity.get("puuid")
+    if not owner or session_owner(snapshot) != owner:
+        return None
+    if not has_persistent_session(snapshot.decode("utf-8")):
+        return None
+    matches = [a for a in list_accounts() if account_puuid(a.name) == owner]
+    if len(matches) != 1:
+        return None  # ne pas deviner en cas de fiche inconnue ou ambiguë
+    account = matches[0]
+    blob = account.dir / "riot_client.bin"
+    if blob.is_file() and not account.expired:
+        try:
+            if dpapi.unprotect(blob.read_bytes()) == snapshot:
+                return account.name  # validée sans archive ni chiffrement supplémentaires
+        except (OSError, ValueError):
+            pass
+    live = current_session_files().get("riot_client")
+    if not live or live.read_bytes() != snapshot:
+        return None  # Riot a réécrit entre la validation et la sauvegarde
+    capture(account.name, refresh=True, expected_owner=owner, session_snapshot=snapshot)
+    return account.name
+
+
+@_serialized_write
 def restore(name: str) -> None:
     """Remplace les fichiers de session actifs par ceux du compte donné.
 
@@ -664,6 +703,9 @@ def delete(name: str) -> None:
     account_dir = paths.ACCOUNTS_DIR / _safe_name(name)
     if not account_dir.is_dir():
         return
+    from . import login_credentials
+    if account_puuid(name):
+        login_credentials.delete(name)
     # Corbeille : une suppression (clic malheureux) ne détruit plus la session.
     # Les 10 dernières suppressions sont gardées, sessions toujours chiffrées.
     try:
@@ -908,7 +950,8 @@ def refresh_active(expected_identity: dict | None = None) -> str | None:
             return None
 
     try:
-        capture(active, refresh=True)
+        capture(active, refresh=True, expected_owner=(
+            expected_identity.get("puuid") if expected_identity else account_puuid(active)))
     except (ValueError, FileNotFoundError):
         return None  # session live absente ou non persistante : on garde l'ancienne copie
     return active

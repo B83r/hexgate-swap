@@ -3,6 +3,7 @@ import subprocess
 import threading
 import time
 import ctypes
+from ctypes import wintypes
 
 from . import paths
 
@@ -32,7 +33,52 @@ VALORANT_GAME_PROCESSES = ["VALORANT-Win64-Shipping.exe"]
 PRODUCTS = {"league_of_legends", "valorant"}
 
 
+class _PROCESSENTRY32W(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ctypes.c_size_t),
+        ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+        ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", wintypes.LONG),
+        ("dwFlags", wintypes.DWORD), ("szExeFile", wintypes.WCHAR * 260),
+    ]
+
+
+def _native_process_names() -> list[str]:
+    """Instantané frais des noms de processus, sans lancer de sous-processus."""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.argtypes = (wintypes.DWORD, wintypes.DWORD)
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    for function in (kernel32.Process32FirstW, kernel32.Process32NextW):
+        function.argtypes = (wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32W))
+        function.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
+    if snapshot == ctypes.c_void_p(-1).value or snapshot is None:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        entry = _PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(entry)
+        names = []
+        valid = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while valid:
+            names.append(entry.szExeFile)
+            valid = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+        if ctypes.get_last_error() != 18:  # ERROR_NO_MORE_FILES
+            raise ctypes.WinError(ctypes.get_last_error())
+        return names
+    finally:
+        kernel32.CloseHandle(snapshot)
+
+
 def _tasklist_lower() -> str:
+    try:
+        return "\n".join(f'"{name.lower()}",' for name in _native_process_names())
+    except (OSError, AttributeError):
+        return _tasklist_subprocess_lower()  # conserve une solution de repli
+
+
+def _tasklist_subprocess_lower() -> str:
     raw = subprocess.run(
         ["tasklist", "/FO", "CSV", "/NH"],
         capture_output=True, creationflags=_NO_WINDOW,
@@ -42,8 +88,8 @@ def _tasklist_lower() -> str:
     return raw.decode("ascii", errors="ignore").lower()
 
 
-# `tasklist` coûte ~450 ms par appel (spawn + énumération complète des
-# process Windows) — trop lent pour rester dans le chemin d'une requête HTTP
+# La lecture native évite le coût de `tasklist` (~550 ms mesurés). Le cache
+# reste utilisé pour ne pas énumérer les processus dans chaque requête HTTP
 # appelée à chaque lancement de l'app et sur presque tout event SSE (constat
 # Yaniss du 17/09/2026, « les comptes mettent plusieurs secondes avant
 # d'apparaître »). Un thread dédié le rafraîchit en tâche de fond ; les
@@ -121,6 +167,8 @@ def product_activity(product: str, _tasklist: str | None = None) -> str:
 
 def kill_riot(timeout: float = 10.0) -> None:
     """Ferme tous les processus Riot et attend leur disparition."""
+    from . import deceive
+    deceive.stop_for_swap()
     args = ["taskkill", "/F"]
     for name in RIOT_PROCESSES:
         args += ["/IM", name]
@@ -137,6 +185,10 @@ def launch_product(product: str) -> None:
     """Lance un produit Riot live après restauration d'une session."""
     if product not in PRODUCTS:
         raise ValueError("produit Riot inconnu")
+    from . import deceive
+    if deceive.enabled():
+        deceive.launch(product)
+        return
     exe = paths.riot_client_exe()
     if exe is None:
         raise FileNotFoundError(
@@ -161,8 +213,6 @@ def launch_league() -> None:
     """Compatibilité des appelants League existants."""
     launch_product("league_of_legends")
 
-
-from ctypes import wintypes
 
 class MOUSEINPUT(ctypes.Structure):
     _fields_ = [

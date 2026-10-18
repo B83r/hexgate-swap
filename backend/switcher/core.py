@@ -14,7 +14,7 @@ Points clés appris en test :
 import time
 from collections.abc import Callable
 
-from . import client_api, lcu_api, process, vault
+from . import client_api, lcu_api, process, vault, login_credentials, login_fallback
 
 StatusCb = Callable[[str], None]
 
@@ -63,6 +63,52 @@ class SessionExpired(Exception):
     par une déconnexion manuelle dans le client)."""
 
 
+def _save_authenticated_session(name: str, on_status: StatusCb,
+                                timeout: float = 20.0) -> bool:
+    """Attend l'écriture des jetons Riot, sans dépendre du démarrage de League.
+
+    L'autorisation RSO arrive parfois avant le fichier durable. Ne jamais
+    capturer une ancienne session encore présente sur disque sous ce nom.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            identity = client_api.current_identity()
+            if identity:
+                _assert_expected_account(name)
+                path = vault.current_session_files().get("riot_client")
+                if path:
+                    raw = path.read_bytes()
+                    if (vault.session_owner(raw) == identity["puuid"]
+                            and vault.has_persistent_session(raw.decode("utf-8"))):
+                        vault.capture(name, refresh=True, expected_owner=identity["puuid"])
+                        on_status(f"Session de « {name} » sauvegardée.")
+                        return True
+        except (client_api.ClientNotRunning, FileNotFoundError):
+            pass  # le client et son fichier peuvent encore être en création
+        time.sleep(1)
+    vault.mark_expired(name)
+    on_status(
+        f"Session de « {name} » non sauvegardée : Riot n'a pas écrit de jeton "
+        "de renouvellement. Reconnecte-toi avec « Rester connecté » coché ; "
+        "l'ancienne copie ne sera pas utilisée automatiquement."
+    )
+    return False
+
+
+def _preserve_connected_session(identity: dict | None, on_status: StatusCb) -> None:
+    """Sauvegarde le compte réel AVANT l'arrêt forcé du client Riot."""
+    if not identity:
+        return
+    for account in vault.list_accounts():
+        known = vault.account_puuid(account.name)
+        if ((known and known == identity.get("puuid"))
+                or (not known and account.riot_id
+                    and account.riot_id == identity.get("riot_id"))):
+            _save_authenticated_session(account.name, on_status)
+            return
+
+
 def swap(name: str, product: str = "league_of_legends",
          on_status: StatusCb = lambda _: None) -> None:
     if product not in process.PRODUCTS:
@@ -70,15 +116,44 @@ def swap(name: str, product: str = "league_of_legends",
     # La session enregistrée doit être celle du compte demandé : sinon le client
     # se reconnecterait sur un autre compte (session écrasée par erreur). On
     # s'arrête AVANT de fermer le client — rien n'est perdu, rien n'est relancé.
+    from . import deceive
+    deceive.ensure_ready()
     problem = vault.check_stored_session(name)
     if problem:
         raise SessionExpired(problem)
+    account = next((a for a in vault.list_accounts() if a.name == name), None)
+    if account and account.expired:
+        if login_credentials.configured(name):
+            reconnect_expired(name, on_status=on_status, product=product)
+            _wait_and_launch_product(name, product, on_status)
+            return
+        raise SessionExpired(
+            f"La session de « {name} » doit être renouvelée. "
+            "Utilise Reconnecter avec « Rester connecté » coché."
+        )
     # Relevé AVANT l'arrêt du client : une fois Riot tué, plus aucune API locale
     # ne peut dire à qui appartient la session live qu'on s'apprête à re-sauvegarder.
     try:
         live_identity = client_api.current_identity()
     except client_api.ClientNotRunning:
         live_identity = None
+    # Réouverture du même compte : l'identité Riot live fait foi, jamais le
+    # pointeur « actif ». Garder le launcher évite sa reconnexion complète.
+    known_puuid = vault.account_puuid(name)
+    reuse_client = bool(live_identity and known_puuid
+                        and live_identity.get("puuid") == known_puuid)
+    if reuse_client and deceive.enabled():
+        reuse_client = bool(deceive.state().get("connected"))
+    if reuse_client:
+        on_status("Compte déjà connecté — réutilisation du client Riot…")
+        _assert_expected_account(name)
+        vault.set_active(name)
+        if process.product_activity(product) != "none":
+            _preserve_connected_session(live_identity, on_status)
+            return
+        _wait_and_launch_product(name, product, on_status)
+        return
+    _preserve_connected_session(live_identity, on_status)
     on_status("Fermeture du client Riot…")
     process.kill_riot()
     refreshed = vault.refresh_active(expected_identity=live_identity)
@@ -89,7 +164,13 @@ def swap(name: str, product: str = "league_of_legends",
     vault.set_active(name)
     on_status("Relance du client…")
     process.launch_product(product)
-    _wait_and_launch_product(name, product, on_status)
+    try:
+        _wait_and_launch_product(name, product, on_status)
+    except SessionExpired:
+        if not login_credentials.configured(name):
+            raise
+        reconnect_expired(name, on_status=on_status, product=product)
+        _wait_and_launch_product(name, product, on_status)
 
 
 class WrongAccountLoggedIn(Exception):
@@ -152,6 +233,7 @@ def _wait_and_launch_product(name: str, product: str, on_status: StatusCb,
     deadline = time.monotonic() + timeout
     login_since = None
     launch_announced = False
+    session_save_attempted = False
     while time.monotonic() < deadline:
         try:
             if client_api.is_logged_in():
@@ -162,7 +244,14 @@ def _wait_and_launch_product(name: str, product: str, on_status: StatusCb,
                     launch_announced = True
                 # Le product-launcher n'est pas prêt immédiatement après le
                 # login : on retente à chaque tour jusqu'à acceptation.
-                if client_api.launch_product(product):
+                launch_accepted = client_api.launch_product(product)
+                if not session_save_attempted:
+                    # Le produit démarre pendant que Riot écrit sa session durable.
+                    # L'identité a été vérifiée AVANT le lancement, et la copie
+                    # reste validée/sauvegardée avant de déclarer le swap terminé.
+                    _save_authenticated_session(name, on_status)
+                    session_save_attempted = True
+                if launch_accepted:
                     on_status(f"Connecté sur « {name} », le jeu se lance.")
                     _ensure_product_started(product, on_status)
                     return
@@ -174,7 +263,7 @@ def _wait_and_launch_product(name: str, product: str, on_status: StatusCb,
             continue
         if current_phase == "Login":
             login_since = login_since or time.monotonic()
-            if time.monotonic() - login_since > 25:
+            if time.monotonic() - login_since > 25 and client_api.login_ready():
                 vault.mark_expired(name)
                 vault.set_active(None)
                 raise SessionExpired(
@@ -208,7 +297,7 @@ def _ensure_product_started(product: str, on_status: StatusCb,
         while time.monotonic() < deadline:
             if process.product_activity(product) != "none":
                 return
-            time.sleep(1.0)
+            time.sleep(0.2)
         if attempt < attempts - 1:
             on_status("Le jeu tarde à démarrer — nouvelle demande de lancement…")
             try:
@@ -221,10 +310,13 @@ def _ensure_product_started(product: str, on_status: StatusCb,
 def prepare_new_login(product: str = "league_of_legends",
                       on_status: StatusCb = lambda _: None) -> None:
     """Amène le client sur la page de login SANS invalider la session actuelle."""
+    from . import deceive
+    deceive.ensure_ready()
     try:
         live_identity = client_api.current_identity()
     except client_api.ClientNotRunning:
         live_identity = None
+    _preserve_connected_session(live_identity, on_status)
     on_status("Fermeture du client Riot…")
     process.kill_riot()
     refreshed = vault.refresh_active(expected_identity=live_identity)
@@ -239,39 +331,55 @@ def prepare_new_login(product: str = "league_of_legends",
 
 
 def reconnect_expired(name: str, on_status: StatusCb = lambda _: None,
-                      timeout: float = 300.0) -> None:
+                      timeout: float = 300.0, product: str = "league_of_legends") -> None:
     """Reconnecte un compte marqué expiré : amène le client sur la page de login,
-    puis sauvegarde automatiquement la session dès que l'utilisateur s'est reconnecté
-    manuellement sur le bon compte (aucun mot de passe n'est géré par l'application).
+    puis sauvegarde la session après vérification du compte connecté. Les identifiants
+    Windows facultatifs permettent une seule tentative de remplissage.
     """
     account = next((a for a in vault.list_accounts() if a.name == name), None)
     if account is None:
         raise FileNotFoundError(f"Compte « {name} » introuvable.")
     expected_riot_id = account.riot_id
 
-    prepare_new_login(on_status=lambda _m: None)
+    prepare_new_login(product=product, on_status=on_status)
     on_status(
         f"Reconnecte-toi sur « {expected_riot_id or name} » "
         "(« Rester connecté » coché), la session sera sauvegardée automatiquement…"
     )
 
     deadline = time.monotonic() + timeout
+    credentials = login_credentials.read(name) if vault.account_puuid(name) else None
+    attempted = False
     while time.monotonic() < deadline:
         time.sleep(2)
         try:
-            if not client_api.is_logged_in():
-                continue
-            summoner = lcu_api.current_summoner()
-        except (client_api.ClientNotRunning, lcu_api.LeagueNotRunning):
+            identity = client_api.current_identity()
+        except client_api.ClientNotRunning:
             continue
-        if not summoner:
+        if not identity:
+            if credentials and not attempted:
+                try:
+                    ready = client_api.login_ready()
+                except client_api.ClientNotRunning:
+                    ready = False
+                if ready:
+                    attempted = True  # One attempt only, including failures/2FA.
+                    on_status("Remplissage des identifiants dans Riot…")
+                    try:
+                        login_fallback.fill(*credentials)
+                        on_status("Identifiants remplis. Termine le 2FA ou captcha dans Riot si demandé.")
+                    except (RuntimeError, OSError, ValueError, TimeoutError):
+                        on_status("Remplissage indisponible. Connecte-toi manuellement dans Riot (Rester connecté coché).")
+                    finally:
+                        credentials = None
             continue
-        if expected_riot_id and summoner["riot_id"] != expected_riot_id:
+        _assert_expected_account(name)
+        if not _save_authenticated_session(name, on_status):
             raise ValueError(
-                f"Connecté sur « {summoner['riot_id']} » au lieu de « {expected_riot_id} » : "
-                "reconnexion annulée pour éviter d'écraser le mauvais compte."
+                "Connexion détectée, mais la session ne peut pas être conservée : "
+                "reconnecte-toi avec « Rester connecté » coché. "
+                "Le compte reste marqué à reconnecter."
             )
-        vault.capture(name, refresh=True)
         on_status(f"Session de « {name} » ressauvegardée automatiquement.")
         return
     raise TimeoutError("Reconnexion non détectée dans le temps imparti (5 minutes).")

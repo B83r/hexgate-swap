@@ -46,7 +46,8 @@ fn api_token() -> Result<String, String> {
 fn spawn_sidecar(_app: &tauri::AppHandle) -> Option<Child> {
     let mut cmd = Command::new("python");
     cmd.args(["-m", "switcher.server", SWITCHER_PORT])
-        .current_dir(SWITCHER_DIR);
+        .current_dir(SWITCHER_DIR)
+        .env("HEXGATE_PARENT_PID", std::process::id().to_string());
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
     cmd.spawn()
@@ -71,7 +72,8 @@ fn spawn_sidecar(app: &tauri::AppHandle) -> Option<Child> {
         .join("hexgate-backend")
         .join("hexgate-backend.exe");
     let mut cmd = Command::new(&exe);
-    cmd.args([SWITCHER_PORT]);
+    cmd.args([SWITCHER_PORT])
+        .env("HEXGATE_PARENT_PID", std::process::id().to_string());
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
     cmd.spawn()
@@ -170,7 +172,9 @@ fn show_main_window(app: &tauri::AppHandle) {
 fn kill_sidecar(app: &tauri::AppHandle) {
     if let Some(state) = app.try_state::<SidecarState>() {
         if let Some(mut child) = state.0.lock().unwrap().take() {
-            child.kill().ok();
+            // Attendre la libération des DLL avant qu'un installateur les remplace.
+            let _ = child.kill();
+            let _ = child.wait();
         }
     }
 }

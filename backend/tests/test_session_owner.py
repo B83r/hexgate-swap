@@ -13,6 +13,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 
 _SANDBOX = tempfile.mkdtemp(prefix="hexgate-owner-")
 os.environ["LOCALAPPDATA"] = _SANDBOX
@@ -194,6 +195,104 @@ class SessionRecoveryTests(unittest.TestCase):
         local_backup.create_startup_backup(retention=3)
         restants = {p.name[17:25] for p in dossier.glob("hexgate_accounts_*.zip")}
         self.assertTrue({"20260101", "20260102", "20260103"} <= restants)
+
+
+class SessionPersistenceTests(unittest.TestCase):
+    def setUp(self):
+        shutil.rmtree(paths.STORAGE_DIR, ignore_errors=True)
+        paths.ACCOUNTS_DIR.mkdir(parents=True)
+        _account("Hide", PUUID_A)
+        _account("Unreal", PUUID_B)
+        self.identity = {"puuid": PUUID_A, "riot_id": "Hide"}
+
+    def test_reconnexion_sauvegarde_sans_client_league(self):
+        _live(PUUID_A)
+        vault.mark_expired("Hide")
+        with patch.object(core, "prepare_new_login"), \
+                patch.object(core.time, "sleep"), \
+                patch.object(core.client_api, "current_identity", return_value=self.identity), \
+                patch.object(core.lcu_api, "current_summoner", side_effect=AssertionError("LCU interdit")):
+            core.reconnect_expired("Hide")
+        self.assertFalse(next(a for a in vault.list_accounts() if a.name == "Hide").expired)
+        self.assertEqual(vault.stored_session_owner("Hide"), PUUID_A)
+
+    def test_attend_le_fichier_durable_apres_login(self):
+        path = paths.SESSION_FILES["riot_client"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"riot-login:\n  persist: null\n")
+        with patch.object(core.client_api, "current_identity", return_value=self.identity), \
+                patch.object(core.time, "sleep", side_effect=lambda _: _live(PUUID_A)) as sleep:
+            self.assertTrue(core._save_authenticated_session("Hide", lambda _: None))
+        sleep.assert_called_once()
+        self.assertEqual(vault.stored_session_owner("Hide"), PUUID_A)
+
+    def test_format_riot_actuel_exige_un_jeton_de_renouvellement(self):
+        modern = (
+            "psl:\n  authorization:\n    session:\n      refresh_token: null\n"
+            "rso-authenticator:\n  cookies:\n"
+            "    - name: device\n      persistent: true\n      value: dummy\n"
+            f"  id_token: {_jwt(PUUID_A)}\n"
+        )
+        self.assertFalse(vault.has_persistent_session(modern))
+        _live(PUUID_A)
+        paths.SESSION_FILES["riot_client"].write_text(
+            modern + "  refresh_token: dummy-refresh\n", encoding="utf-8")
+        with patch.object(core.client_api, "current_identity", return_value=self.identity):
+            self.assertTrue(core._save_authenticated_session("Hide", lambda _: None))
+        self.assertEqual(vault.stored_session_owner("Hide"), PUUID_A)
+
+    def test_absence_de_jeton_ne_reutilise_pas_ancienne_copie(self):
+        _live(PUUID_A)
+        before = (paths.ACCOUNTS_DIR / "Hide" / "riot_client.bin").read_bytes()
+        paths.SESSION_FILES["riot_client"].write_bytes(b"riot-login:\n  persist: null\n")
+        messages = []
+        with patch.object(core.client_api, "current_identity", return_value=self.identity), \
+                patch.object(core.time, "monotonic", side_effect=[0, 0, 2]), \
+                patch.object(core.time, "sleep"):
+            self.assertFalse(core._save_authenticated_session("Hide", messages.append, timeout=1))
+        self.assertTrue(next(a for a in vault.list_accounts() if a.name == "Hide").expired)
+        self.assertEqual((paths.ACCOUNTS_DIR / "Hide" / "riot_client.bin").read_bytes(), before)
+        self.assertIn("non sauvegardée", messages[-1])
+        with patch.object(core.process, "kill_riot") as kill:
+            with self.assertRaises(core.SessionExpired):
+                core.swap("Hide")
+            kill.assert_not_called()
+
+    def test_fichier_encore_sur_autre_compte_nest_pas_capture(self):
+        _live(PUUID_B)
+        before = (paths.ACCOUNTS_DIR / "Hide" / "riot_client.bin").read_bytes()
+        with patch.object(core.client_api, "current_identity", return_value=self.identity), \
+                patch.object(core.time, "monotonic", side_effect=[0, 0, 2]), \
+                patch.object(core.time, "sleep"):
+            self.assertFalse(core._save_authenticated_session("Hide", lambda _: None, timeout=1))
+        self.assertEqual((paths.ACCOUNTS_DIR / "Hide" / "riot_client.bin").read_bytes(), before)
+
+    def test_reconnexion_sur_mauvais_compte_est_refusee(self):
+        _live(PUUID_B)
+        with patch.object(core, "prepare_new_login"), \
+                patch.object(core.time, "sleep"), \
+                patch.object(core.client_api, "current_identity", return_value={"puuid": PUUID_B, "riot_id": "Unreal"}):
+            with self.assertRaises(core.WrongAccountLoggedIn):
+                core.reconnect_expired("Hide")
+        self.assertEqual(vault.stored_session_owner("Hide"), PUUID_A)
+
+    def test_sauvegarde_avant_arret_utilise_identite_reelle(self):
+        _live(PUUID_A)
+        vault.set_active("Unreal")
+        with patch.object(core.client_api, "current_identity", return_value=self.identity):
+            core._preserve_connected_session(self.identity, lambda _: None)
+        self.assertEqual(vault.get_active(), "Hide")
+        self.assertEqual(vault.stored_session_owner("Unreal"), PUUID_B)
+
+    def test_capture_automatique_exige_identite_du_fichier(self):
+        _live(PUUID_A)
+        before = (paths.ACCOUNTS_DIR / "Hide" / "riot_client.bin").read_bytes()
+        paths.SESSION_FILES["riot_client"].write_bytes(b'riot-login:\n  cookie: "ssid"\n')
+        with self.assertRaises(ValueError):
+            vault.capture("Hide", refresh=True, expected_owner=PUUID_A)
+        vault.set_active("Hide")
+        self.assertIsNone(vault.refresh_active(expected_identity=self.identity))
+        self.assertEqual((paths.ACCOUNTS_DIR / "Hide" / "riot_client.bin").read_bytes(), before)
 
 
 if __name__ == "__main__":

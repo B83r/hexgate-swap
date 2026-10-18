@@ -54,6 +54,18 @@ def is_logged_in() -> bool:
     return status == 200
 
 
+def login_ready() -> bool:
+    """Only a ready auth service with explicit signed-out status permits filling."""
+    status, body = _call("GET", "/rso-auth/configuration/v3/ready-state")
+    if status != 200 or json.loads(body).get("ready") is not True:
+        return False
+    status, _ = _call("GET", "/rso-auth/v1/authorization")
+    session_status, session_body = _call("GET", "/rso-auth/v1/session")
+    if session_status != 200 or json.loads(session_body).get("type") != "auth":
+        return False
+    return status == 404 and phase() == "Login"
+
+
 def current_identity() -> dict | None:
     """Identité réellement connectée : {'puuid': ..., 'riot_id': 'Nom#TAG'}.
 

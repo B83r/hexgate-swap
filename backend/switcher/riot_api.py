@@ -59,6 +59,12 @@ def _load_env_key() -> str | None:
 class RiotApiError(RuntimeError):
     """Erreur d'appel à la Riot API (message affichable à l'utilisateur)."""
 
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        # Le code HTTP doit rester disponible pour que l'interface distingue
+        # une clé réellement refusée d'un endpoint/identifiant interdit.
+        self.status_code = status_code
+
 
 # Cloudflare, devant la Riot API, bloque le User-Agent « Python-urllib » par
 # défaut (403 « error code: 1010 ») — un UA navigateur est OBLIGATOIRE.
@@ -139,14 +145,23 @@ class RiotClient:
                     wait = int(e.headers.get("Retry-After", "2"))
                     time.sleep(min(wait, 10))
                     continue
-                if e.code in (401, 403):
+                if e.code == 401:
                     raise RiotApiError(
-                        "Clé Riot API refusée (401/403). Une clé dev expire toutes "
-                        "les 24 h — régénère-la sur developer.riotgames.com."
+                        "Clé Riot API refusée (401) : elle est invalide ou expirée. "
+                        "Une clé dev expire toutes les 24 h — régénère-la sur "
+                        "developer.riotgames.com.",
+                        status_code=401,
+                    ) from e
+                if e.code == 403:
+                    raise RiotApiError(
+                        f"Accès Riot API refusé (403) sur {path}. "
+                        "La clé n'est pas forcément expirée : vérifie l'identifiant "
+                        "du compte et la région.",
+                        status_code=403,
                     ) from e
                 if e.code == 404:
                     return None
-                raise RiotApiError(f"Riot API {e.code} sur {path}.") from e
+                raise RiotApiError(f"Riot API {e.code} sur {path}.", status_code=e.code) from e
             except (urllib.error.URLError, TimeoutError) as e:
                 if attempt == 3:
                     raise RiotApiError(f"Riot API injoignable ({e}).") from e
